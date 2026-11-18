@@ -7,12 +7,11 @@ No API key needed.
 """
 
 import re
-import httpx
 from bs4 import BeautifulSoup
 from typing import Dict, List, Optional
 from thefuzz import fuzz
 import logging
-from data_sources.base_source import BaseSource
+from data_sources.base_source import BaseSource, http_request
 from data_sources.data_cache import DataCache
 
 logger = logging.getLogger(__name__)
@@ -42,17 +41,12 @@ class EAFCRatingsSource(BaseSource):
         if cached:
             return BeautifulSoup(cached.get("html", ""), "lxml")
 
-        try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                response = await client.get(url, headers=self.headers)
-                response.raise_for_status()
-                html = response.text
-                self.cache.set(cache_key, {"html": html})
-                return BeautifulSoup(html, "lxml")
-
-        except httpx.HTTPError as e:
-            logger.error(f"FUTWIZ fetch error for {url}: {e}")
+        response = await http_request("GET", url, headers=self.headers)
+        if response is None:
             return None
+        html = response.text
+        self.cache.set(cache_key, {"html": html})
+        return BeautifulSoup(html, "lxml")
 
     async def search_players(
         self,

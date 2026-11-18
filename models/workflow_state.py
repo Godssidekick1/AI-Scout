@@ -1,42 +1,48 @@
 """
 Workflow State
 ==============
-Shared state passed between all LangGraph agent nodes.
+Shared state for the LangGraph workflow.
+
+How updates work: a node returns ONLY the keys it changed. For keys with a reducer
+(the Annotated ones), LangGraph combines the node's value with the current value
+using that reducer; other keys are simply overwritten.
+
+- `messages`, `errors`, `rejected` append (operator.add), so parallel nodes can
+  both write to them safely.
+- `character_reports` and `financial_assessments` are dicts keyed by player_id and
+  merged, so results are joined by id, never by list position.
 """
 
-from typing import Dict, List, Optional, Annotated
-from typing_extensions import TypedDict
 import operator
+from typing import Annotated, Dict, List, Optional
 
-import pandas as pd
+from typing_extensions import TypedDict
 
 
-class ScoutingState(TypedDict):
-    """The shared state that flows through the LangGraph workflow."""
+def merge_dicts(left: Optional[Dict], right: Optional[Dict]) -> Dict:
+    return {**(left or {}), **(right or {})}
 
-    # === User Input ===
+
+class ScoutingState(TypedDict, total=False):
+    # Input
     user_request: str
-    tactical_system: Optional[str]
-    position: Optional[str]
-    budget_max: Optional[float]
 
-    # === Request Parser Output ===
-    search_constraints: Optional[Dict]
-    benchmark_player: Optional[str]
-    key_attributes: Optional[List[str]]
+    # Request parser
+    constraints: Dict                       # SearchConstraints.model_dump()
 
-    # === Player Finder Output ===
-    candidate_pool: Annotated[List[Dict], operator.add]
+    # Player finder (agent) <-> verifier loop
+    proposals: List[Dict]                   # this attempt's ProposedCandidate dicts (overwritten)
+    finder_attempts: int
+    rejected: Annotated[List[Dict], operator.add]   # {"name", "reason"}: fed back to the finder
+    candidates: List[Dict]                  # verified Candidate dicts (overwritten by verifier)
 
-    # === Background Checker Output ===
-    character_reports: Annotated[List[Dict], operator.add]
+    # Parallel checks, keyed by player_id
+    character_reports: Annotated[Dict[str, Dict], merge_dicts]
+    financial_assessments: Annotated[Dict[str, Dict], merge_dicts]
 
-    # === Financial Analyst Output ===
-    financial_assessments: Annotated[List[Dict], operator.add]
+    # Report writer
+    scouting_reports: List[Dict]
 
-    # === Report Writer Output ===
-    scouting_reports: Annotated[List[Dict], operator.add]
-
-    # === Workflow Metadata ===
-    messages: Annotated[List, operator.add]
+    # Metadata
+    messages: Annotated[List[str], operator.add]
     errors: Annotated[List[str], operator.add]
