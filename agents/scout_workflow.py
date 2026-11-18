@@ -1,100 +1,81 @@
 """
-Scout Workflow — LangGraph DAG
-==============================
-Wires all 5 agents together into a sequential workflow:
-Request Parser → Player Finder → [Background Checker + Financial Analyst] → Report Writer
+Scout Workflow (LangGraph)
+==========================
+
+    request_parser
+         |
+    player_finder  <-------------+   agent: Gemini + data tools
+         |                       |
+     verifier  --- too few? -----+   critic: deterministic checks, loops back with feedback
+         |
+    +----+--------------+            fan-out: both run in the same superstep
+    |                   |
+ background_checker  financial_analyst
+    |                   |
+    +----+--------------+            join: report_writer waits for both
+         |
+    report_writer -> END
 """
 
+import asyncio
 import logging
 from typing import Dict
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, START, StateGraph
 
-from models.workflow_state import ScoutingState
-from agents.request_parser import parse_request
-from agents.player_finder import find_players
 from agents.background_checker import check_backgrounds
 from agents.financial_analyst import analyze_finances
+from agents.player_finder import find_players
 from agents.report_writer import write_reports
+from agents.request_parser import parse_request
+from agents.verifier import route_after_verify, verify_candidates
+from core.context import start_context
+from core.tracing import start_trace
+from models.workflow_state import ScoutingState
 
 logger = logging.getLogger(__name__)
 
 
-def build_scout_workflow() -> StateGraph:
-    """
-    Build the LangGraph DAG for the multi-agent scouting system.
+def build_scout_workflow():
+    g = StateGraph(ScoutingState)
+    g.add_node("request_parser", parse_request)
+    g.add_node("player_finder", find_players)
+    g.add_node("verifier", verify_candidates)
+    g.add_node("background_checker", check_backgrounds)
+    g.add_node("financial_analyst", analyze_finances)
+    g.add_node("report_writer", write_reports)
 
-    Flow:
-        request_parser → player_finder → background_checker → financial_analyst → report_writer → END
-    
-    Note: background_checker and financial_analyst run sequentially for now.
-    They could run in parallel with LangGraph's fan-out, but keeping it
-    simple for the initial version to avoid async complexity.
-    """
-    workflow = StateGraph(ScoutingState)
+    g.add_edge(START, "request_parser")
+    g.add_edge("request_parser", "player_finder")
+    g.add_edge("player_finder", "verifier")
+    g.add_conditional_edges("verifier", route_after_verify,
+                            ["player_finder", "background_checker", "financial_analyst"])
+    g.add_edge(["background_checker", "financial_analyst"], "report_writer")
+    g.add_edge("report_writer", END)
+    return g.compile()
 
-    # Add agent nodes
-    workflow.add_node("request_parser", parse_request)
-    workflow.add_node("player_finder", find_players)
-    workflow.add_node("background_checker", check_backgrounds)
-    workflow.add_node("financial_analyst", analyze_finances)
-    workflow.add_node("report_writer", write_reports)
 
-    # Define the flow
-    workflow.add_edge("request_parser", "player_finder")
-    workflow.add_edge("player_finder", "background_checker")
-    workflow.add_edge("background_checker", "financial_analyst")
-    workflow.add_edge("financial_analyst", "report_writer")
-    workflow.add_edge("report_writer", END)
+async def arun_scout(user_request: str) -> Dict:
+    logger.info("Starting scout workflow: %r", user_request)
+    trace = start_trace()
+    ctx = start_context()
 
-    # Entry point
-    workflow.set_entry_point("request_parser")
+    final = await build_scout_workflow().ainvoke({"user_request": user_request}, {"recursion_limit": 40})
 
-    return workflow.compile()
+    reports = final.get("scouting_reports", [])
+    logger.info("Workflow complete: %d reports", len(reports))
+    return {
+        "constraints": final.get("constraints", {}),
+        "reports": reports,
+        "candidates_verified": len(final.get("candidates", [])),
+        "rejected": final.get("rejected", []),
+        "finder_attempts": final.get("finder_attempts", 0),
+        "messages": final.get("messages", []),
+        "errors": final.get("errors", []) + ctx.errors,
+        "trace": trace.summary(),
+    }
 
 
 def run_scout(user_request: str) -> Dict:
-    """
-    Run the complete scouting workflow.
-
-    Args:
-        user_request: Natural language scouting query.
-
-    Returns:
-        Dictionary with reports, candidate count, and workflow messages.
-    """
-    logger.info(f"Starting scout workflow: '{user_request}'")
-
-    workflow = build_scout_workflow()
-
-    # Initialize state
-    initial_state = {
-        "user_request": user_request,
-        "tactical_system": None,
-        "position": None,
-        "budget_max": None,
-        "search_constraints": None,
-        "benchmark_player": None,
-        "key_attributes": None,
-        "candidate_pool": [],
-        "character_reports": [],
-        "financial_assessments": [],
-        "scouting_reports": [],
-        "messages": [],
-        "errors": [],
-    }
-
-    # Execute
-    final_state = workflow.invoke(initial_state)
-
-    reports = final_state.get("scouting_reports", [])
-    messages = final_state.get("messages", [])
-
-    logger.info(f"Workflow complete. {len(reports)} reports generated.")
-
-    return {
-        "reports": reports,
-        "candidates_analyzed": len(final_state.get("candidate_pool", [])),
-        "messages": [m.content if hasattr(m, 'content') else str(m) for m in messages],
-        "errors": final_state.get("errors", []),
-    }
+    """Synchronous entry point for the CLI."""
+    return asyncio.run(arun_scout(user_request))

@@ -1,11 +1,11 @@
 """
-AI Scout System — Main Entry Point
-===================================
-Run the multi-agent scouting system from the command line.
+AI Scout — command line
+=======================
 
-Usage:
     python main.py "Find an inverted winger for Slot's Liverpool 4-3-3, under 25, budget 60M"
-    python main.py --format json "Find a striker under 23"
+    python main.py --format json "Striker under 23 from La Liga or Bundesliga"
+    python main.py --check        # which keys and sources are configured
+    python main.py --graph        # print the LangGraph as Mermaid
 """
 
 import argparse
@@ -14,156 +14,102 @@ import logging
 import sys
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from agents.scout_workflow import run_scout
-from config import settings
+from config import settings  # noqa: E402
+
+VERDICT_ICON = {"GO": "✅", "CAUTION": "⚠️", "NO-GO": "❌"}
 
 
 def setup_logging(verbose: bool = False):
-    """Configure logging."""
-    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
-        level=level,
+        level=logging.DEBUG if verbose else logging.WARNING,
         format="%(asctime)s | %(name)-25s | %(levelname)-7s | %(message)s",
         datefmt="%H:%M:%S",
     )
-    # Quiet down noisy libraries
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("chromadb").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    for noisy in ("httpx", "httpcore", "google_genai"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-def print_report_text(result: dict):
-    """Pretty-print scouting reports in text format."""
+def check_config() -> None:
+    print("\nConfiguration")
+    rows = [
+        ("Gemini (agent + LLM steps)", settings.has_gemini(), "set GOOGLE_API_KEY; without it a deterministic baseline runs"),
+        ("Serper (news)", settings.has_serper(), "set SERPER_API_KEY; character checks fall back to card counts"),
+        ("Understat (stats, no key)", True, ""),
+        ("Transfermarkt (value, no key)", settings.ENABLE_TRANSFERMARKT, "disabled"),
+        ("EA FC / FUTWIZ (no key)", settings.ENABLE_EA_FC, "disabled"),
+    ]
+    for name, ok, hint in rows:
+        print(f"  {'✅' if ok else '❌'} {name:<32} {'' if ok else hint}")
+    print(f"  Model: {settings.GEMINI_MODEL} (bulk: {settings.GEMINI_FAST_MODEL}) | Understat season: {settings.UNDERSTAT_SEASON}")
+
+
+def print_report_text(result: dict, top_n: int = 5) -> None:
     reports = result.get("reports", [])
-
     print("\n" + "=" * 80)
-    print("⚽  AI SCOUT SYSTEM — SCOUTING REPORT")
+    print("AI SCOUT — SCOUTING REPORT")
     print("=" * 80)
-
-    # Print workflow messages
-    messages = result.get("messages", [])
-    if messages:
-        print("\n📊 Workflow Summary:")
-        for msg in messages:
-            print(f"   {msg}")
+    for msg in result.get("messages", []):
+        print(f"  · {msg}")
 
     if not reports:
-        print("\n❌ No candidates found matching your criteria.")
-        print("   Try broadening your search (different position, higher budget, etc.)")
-        return
-
-    print(f"\n🎯 {len(reports)} candidates analyzed | "
-          f"Top {min(len(reports), 5)} shown below")
-
-    for i, report in enumerate(reports[:5], 1):
-        print(f"\n{'─' * 80}")
-        print(f"  #{i}  {report['player_name']}  ({report['age']})  —  "
-              f"{report.get('position', '?')}  |  {report.get('team', '?')}  |  {report.get('league', '?')}")
+        print("\nNo verified candidates. Try a broader role, a higher budget or more leagues.")
+    for i, r in enumerate(reports[:top_n], 1):
+        fin = r.get("financial_assessment") or {}
+        age = r.get("age") if r.get("age") is not None else "?"
+        print(f"\n{'─' * 80}\n#{i}  {r['player_name']} ({age})  {r['team']}  |  {r['league']}  |  {r['season']}")
         print(f"{'─' * 80}")
-
-        # Scores
-        print(f"  📊 Overall Score:      {report['overall_score']}/100   →  {report['verdict']}")
-        print(f"  🎯 Tactical Fit:       {report['tactical_fit_score']}/100")
-        print(f"  📈 Statistical Rating: {report['statistical_rating']}/100")
-        print(f"  👤 Character Score:    {report['character_score']}/10")
-        print(f"  💰 Financial Score:    {report['financial_viability']}/100")
-        print(f"  🏥 Injury Risk:        {report['injury_risk']}/10")
-
-        # Strengths
-        if report.get("strengths"):
-            print(f"\n  ✅ Strengths:")
-            for s in report["strengths"]:
-                print(f"     • {s}")
-
-        # Weaknesses
-        if report.get("weaknesses"):
-            print(f"\n  ⚠️  Weaknesses:")
-            for w in report["weaknesses"]:
-                print(f"     • {w}")
-
-        # Risks
-        if report.get("risk_factors"):
-            print(f"\n  🚩 Risk Factors:")
-            for r in report["risk_factors"]:
-                print(f"     • {r}")
-
-        # Similar players
-        if report.get("similar_players"):
-            print(f"\n  👥 Similar Players: {', '.join(report['similar_players'])}")
-
-        # Financial details
-        fin = report.get("financial_assessment", {})
+        print(f"  Overall {r['overall_score']}/100  {VERDICT_ICON.get(r['verdict'], '')} {r['verdict']}")
+        print(f"  Tactical fit {r['tactical_fit_score']}/100 (data coverage {int(r['tactical_fit_coverage'] * 100)}%)"
+              f" | Stats {r['statistical_rating']}/100 | Character {r['character_score']}/10"
+              f" | Value {r['financial_viability']}/100 | Injury risk {r['injury_risk']}/10")
+        ks = r.get("key_stats", {})
+        print(f"  {ks.get('minutes_played', 0):.0f} min, {ks.get('goals', 0):.0f} G, {ks.get('assists', 0):.0f} A | "
+              f"npxG/90 {ks.get('npxG_p90', 0):.2f}  xA/90 {ks.get('xA_p90', 0):.2f}  "
+              f"xGChain/90 {ks.get('xGChain_p90', 0):.2f}  (PL-adjusted)")
+        for label, key in (("Strengths", "strengths"), ("Weaknesses", "weaknesses"), ("Risks", "risk_factors")):
+            if r.get(key):
+                print(f"  {label}: " + "; ".join(r[key]))
         if fin:
-            print(f"\n  💵 Market Value:  €{fin.get('current_market_value_eur', '?')}M")
-            print(f"  📝 Contract:     {fin.get('years_remaining', '?')} years remaining")
-            print(f"  🤝 Agent:        {fin.get('agent', 'Unknown')}")
-            print(f"  📊 Feasibility:  {fin.get('transfer_feasibility', '?')}")
+            est = " (estimate)" if fin.get("market_value_is_estimate") else ""
+            print(f"  Value EUR {fin.get('current_market_value_eur')}M{est} | contract {fin.get('contract_end_date') or '?'}"
+                  f" | feasibility {fin.get('transfer_feasibility')}")
+        if r.get("similar_players"):
+            print(f"  Similar in this pool: {', '.join(r['similar_players'])}")
+        for name, sim in (r.get("benchmark_comparison") or {}).items():
+            print(f"  Similarity to {name}: {sim}%")
+        print(f"\n  {r.get('executive_summary', '')}")
+        print(f"  Sources: {', '.join(r.get('data_sources', []))}")
 
-        # Executive summary
-        if report.get("executive_summary"):
-            print(f"\n  📋 Executive Summary:")
-            print(f"     {report['executive_summary']}")
+    if result.get("rejected"):
+        print(f"\nRejected by the verifier ({len(result['rejected'])}):")
+        for rej in result["rejected"][:10]:
+            print(f"  ✗ {rej['name']}: {rej['reason']}")
 
-        # Data sources
-        if report.get("data_sources"):
-            print(f"\n  📡 Data from: {', '.join(report['data_sources'])}")
-
-    print(f"\n{'=' * 80}")
-    print("  Report generated by AI Scout System v2.0")
-    print(f"  Data sources: Understat, API-Football, Transfermarkt, EA FC 26, Serper")
-    print(f"  AI: Google Gemini ({settings.GEMINI_MODEL})")
-    print(f"{'=' * 80}\n")
-
-
-def check_config():
-    """Print configuration status."""
-    print("\n🔧 Configuration Status:")
-
-    checks = [
-        ("Google Gemini (LLM)", settings.has_gemini(), "GOOGLE_API_KEY"),
-        ("API-Football (Stats)", settings.has_api_football(), "API_FOOTBALL_KEY"),
-        ("Serper.dev (News)", settings.has_serper(), "SERPER_API_KEY"),
-        ("Understat (xG/xA)", settings.ENABLE_UNDERSTAT, "No key needed"),
-        ("Transfermarkt (Market)", settings.ENABLE_TRANSFERMARKT, "No key needed"),
-        ("EA FC 26 (Ratings)", settings.ENABLE_EA_FC, "No key needed"),
-    ]
-
-    all_ok = True
-    for name, status, key_name in checks:
-        icon = "✅" if status else "❌"
-        if not status and key_name != "No key needed":
-            all_ok = False
-        print(f"   {icon} {name:<25} {'Configured' if status else f'Missing — set {key_name} in .env'}")
-
-    if not settings.has_gemini():
-        print("\n   ⚠️  Gemini is required for full functionality. The system will use")
-        print("      fallback parsing without it, but reports won't have AI summaries.")
-
-    return all_ok
+    t = result.get("trace", {})
+    if t:
+        print("\nRun trace")
+        print(f"  Total {t['total_ms'] / 1000:.1f}s | finder attempts {result.get('finder_attempts')} | "
+              f"LLM calls {t['llm_calls']} (+{t['llm_cache_hits']} cached, {t['llm_retries']} retries) | "
+              f"tokens {t['input_tokens']} in / {t['output_tokens']} out | est. ${t['est_cost_usd']:.4f} | "
+              f"tool calls {t['tool_calls']} | source requests {t['source_requests']}")
+        print("  " + " | ".join(f"{k} {v / 1000:.1f}s" for k, v in t["node_ms"].items()))
+    if result.get("errors"):
+        print("\nDegraded steps:")
+        for e in result["errors"]:
+            print(f"  ! {e}")
+    print()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="AI Scout System — Multi-agent football scouting",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main.py "Find an inverted winger for Slot's 4-3-3, under 25, budget 60M"
-  python main.py "Box-to-box midfielder for Arteta's Arsenal, max 50M"
-  python main.py --format json "Striker under 23 from La Liga or Bundesliga"
-  python main.py --check  (show configuration status)
-        """,
-    )
-
+    parser = argparse.ArgumentParser(description="AI Scout — agentic football scouting")
     parser.add_argument("query", nargs="?", help="Scouting query in natural language")
-    parser.add_argument("--format", choices=["text", "json"], default="text",
-                        help="Output format (default: text)")
-    parser.add_argument("--check", action="store_true", help="Check configuration status")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
-
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--check", action="store_true", help="Show configuration status")
+    parser.add_argument("--graph", action="store_true", help="Print the workflow graph as Mermaid")
+    parser.add_argument("--no-cache", action="store_true", help="Bypass the LLM response cache")
+    parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
     setup_logging(args.verbose)
 
@@ -171,25 +117,18 @@ Examples:
         check_config()
         return
 
+    from agents.scout_workflow import build_scout_workflow, run_scout
+
+    if args.graph:
+        print(build_scout_workflow().get_graph().draw_mermaid())
+        return
     if not args.query:
         parser.print_help()
-        print("\n💡 Tip: Run 'python main.py --check' to see your configuration status")
         return
+    if args.no_cache:
+        settings.LLM_CACHE = False
 
-    # Show config status
-    check_config()
-    print(f"\n🔍 Running query: \"{args.query}\"\n")
-
-    # Run the scouting workflow
-    try:
-        result = run_scout(args.query)
-    except Exception as e:
-        logging.error(f"Workflow failed: {e}", exc_info=True)
-        print(f"\n❌ Error: {e}")
-        print("   Run with --verbose for full error details.")
-        return
-
-    # Output results
+    result = run_scout(args.query)
     if args.format == "json":
         print(json.dumps(result, indent=2, default=str))
     else:

@@ -1,320 +1,198 @@
 """
-Agent 5: Report Writer ("The Scout")
-=====================================
-Assembles all data into final scouting reports with tactical fit scores,
-risk assessment, and a GO / CAUTION / NO-GO verdict.
+Step 5: Report Writer
+=====================
+Joins candidates with their character and financial results by player_id,
+scores them deterministically, and asks Gemini for all executive summaries in
+ONE batched structured call (instead of one call per player).
 """
 
 import json
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from analysis.player_comparison import PlayerComparisonEngine
+from analysis.player_comparison import PlayerComparisonEngine, cosine_similarity
+from analysis.tactical_fit import statistical_rating, tactical_fit
 from config import settings
+from core import llm
+from core.context import get_context
+from core.tracing import traced_node
+from data_sources.understat_source import position_family
+from models.llm_schemas import ExecutiveSummaries, SearchConstraints
+from models.scouting_report import CharacterReport, FinancialAssessment, ScoutingReport
 
 logger = logging.getLogger(__name__)
 
-REPORT_PROMPT = """You are a Premier League chief scout writing a final scouting report.
+WEIGHTS = {"tactical": 0.30, "statistical": 0.25, "character": 0.20, "financial": 0.15, "fitness": 0.10}
 
-Player: {player_name} ({age}, {position}) — {team} ({league})
+SUMMARY_SYSTEM_PROMPT = """You are a Premier League chief scout.
+For each player in the JSON, write a 3-4 sentence executive summary: tactical fit for the
+stated system, the #1 strength, the #1 risk, and a clear recommendation consistent with
+the verdict. Use only the facts provided; do not add stats, injuries or history.
+Return one summary per player_id."""
 
-Stats (adjusted for PL equivalence):
-{stats_summary}
-
-Character Assessment:
-- Attitude: {attitude_score}/10
-- Discipline issues: {discipline_issues}
-- Injury risk: {injury_risk}/10 ({total_days_injured} days missed in 24 months)
-
-Financial:
-- Market value: €{market_value}M
-- Contract remaining: {years_remaining} years
-- Value-for-money: {vfm_score}/100
-- Transfer feasibility: {feasibility}
-
-Tactical system required: {tactical_system}
-
-Write a 3-4 sentence executive summary that:
-1. Evaluates tactical fit for the specified system
-2. Highlights the #1 strength and #1 risk
-3. Makes a clear recommendation
-
-Respond with ONLY the summary text, no JSON or formatting."""
+KEY_STATS = ["minutes_played", "goals", "assists", "npxG_p90", "xA_p90", "key_passes_p90",
+             "xGChain_p90", "xGBuildup_p90"]
 
 
-def write_reports(state: Dict) -> Dict:
-    """
-    Generate final scouting reports for all candidates.
-    """
-    candidates = state.get("candidate_pool", [])
-    character_reports = state.get("character_reports", [])
-    financial_assessments = state.get("financial_assessments", [])
-    tactical_system = state.get("tactical_system", "General")
-    benchmark_player = state.get("benchmark_player")
+@traced_node("report_writer")
+async def write_reports(state: Dict) -> Dict:
+    c = SearchConstraints.model_validate(state["constraints"])
+    candidates = state.get("candidates", [])
+    chars = state.get("character_reports", {})
+    fins = state.get("financial_assessments", {})
+    family = position_family(c.position)
+    errors: List[str] = []
 
-    comparison = PlayerComparisonEngine()
+    engine = PlayerComparisonEngine()
+    for cand in candidates:
+        engine.add_player(cand["player_id"], cand["name"], cand)
 
-    # Add all candidates to comparison engine
-    for i, c in enumerate(candidates):
-        comparison.add_player(
-            player_id=c.get("player_id", str(i)),
-            name=c.get("name", "Unknown"),
-            stats=c,
-        )
+    benchmark = await get_context().find_player(c.benchmark_player) if c.benchmark_player else None
 
-    reports = []
-    for i, candidate in enumerate(candidates):
-        char = character_reports[i] if i < len(character_reports) else {}
-        fin = financial_assessments[i] if i < len(financial_assessments) else {}
+    reports: List[ScoutingReport] = []
+    for cand in candidates:
+        pid = cand["player_id"]
+        char = CharacterReport.model_validate(chars.get(pid) or {"player_id": pid, "player_name": cand["name"]})
+        fin = FinancialAssessment.model_validate(fins.get(pid) or {"player_id": pid, "player_name": cand["name"]})
 
-        # Tactical fit score
-        tactical_fit = _calculate_tactical_fit(candidate, tactical_system)
+        fit, coverage = tactical_fit(cand, c.tactical_system)
+        stat = statistical_rating(cand, family)
+        overall = round(
+            fit * WEIGHTS["tactical"]
+            + stat * WEIGHTS["statistical"]
+            + char.attitude_score * 10 * WEIGHTS["character"]
+            + fin.value_for_money_score * WEIGHTS["financial"]
+            + (10 - char.injury_risk_score) * 10 * WEIGHTS["fitness"], 1)
 
-        # Statistical rating
-        stat_rating = _calculate_statistical_rating(candidate)
+        reports.append(ScoutingReport(
+            player_id=pid,
+            player_name=cand["name"],
+            position=c.position,
+            understat_position=cand.get("understat_position", ""),
+            age=cand.get("age"),
+            team=cand.get("team", ""),
+            league=cand.get("league", ""),
+            season=cand.get("season", ""),
+            tactical_fit_score=fit,
+            tactical_fit_coverage=coverage,
+            statistical_rating=stat,
+            character_score=round(char.attitude_score, 1),
+            financial_viability=fin.value_for_money_score,
+            injury_risk=char.injury_risk_score,
+            overall_score=overall,
+            verdict=verdict(overall, char.injury_risk_score, fin.transfer_feasibility),
+            strengths=strengths(cand),
+            weaknesses=weaknesses(cand, family),
+            risk_factors=risks(char, fin),
+            similar_players=[p["name"] for p in engine.find_similar(cand, n=3, exclude_id=pid)],
+            benchmark_comparison={benchmark["name"]: cosine_similarity(cand, benchmark)} if benchmark else {},
+            key_stats={k: cand.get(k, 0) for k in KEY_STATS},
+            character_report=char,
+            financial_assessment=fin,
+            data_sources=sorted(set(cand.get("sources", []) + char.sources)),
+        ))
 
-        # Character score
-        char_score = char.get("attitude_score", 7.5)
-        injury_risk = char.get("injury_risk_score", 2.0)
+    reports.sort(key=lambda r: r.overall_score, reverse=True)
 
-        # Financial viability
-        fin_score = fin.get("value_for_money_score", 50.0)
+    summaries: Dict[str, str] = {}
+    if reports and settings.has_gemini():
+        try:
+            summaries = await summarise(reports, c)
+        except llm.LLMError as e:
+            errors.append(f"report_writer: summaries failed, used templates ({e})")
+    for r in reports:
+        r.executive_summary = summaries.get(r.player_id) or template_summary(r)
 
-        # Overall weighted score
-        overall = (
-            tactical_fit * 0.30 +
-            stat_rating * 0.25 +
-            (char_score * 10) * 0.20 +
-            fin_score * 0.15 +
-            ((10 - injury_risk) * 10) * 0.10
-        )
-
-        # Verdict
-        if overall >= 75 and injury_risk < 5:
-            verdict = "GO ✅"
-        elif overall >= 55:
-            verdict = "CAUTION ⚠️"
-        else:
-            verdict = "NO-GO ❌"
-
-        # Strengths and weaknesses
-        strengths = _identify_strengths(candidate)
-        weaknesses = _identify_weaknesses(candidate)
-        risks = _identify_risks(char, fin, injury_risk)
-
-        # Similar players
-        similar = comparison.find_similar(candidate, n=3, exclude_id=candidate.get("player_id", str(i)))
-
-        # Executive summary via LLM
-        summary = _generate_summary(candidate, char, fin, tactical_system)
-
-        report = {
-            "player_name": candidate.get("name", "Unknown"),
-            "position": candidate.get("position", ""),
-            "age": candidate.get("age", 0),
-            "team": candidate.get("team", ""),
-            "league": candidate.get("league", ""),
-            "tactical_fit_score": round(tactical_fit, 1),
-            "statistical_rating": round(stat_rating, 1),
-            "character_score": round(char_score, 1),
-            "financial_viability": round(fin_score, 1),
-            "injury_risk": round(injury_risk, 1),
-            "overall_score": round(overall, 1),
-            "verdict": verdict,
-            "strengths": strengths,
-            "weaknesses": weaknesses,
-            "risk_factors": risks,
-            "similar_players": [p["name"] for p in similar],
-            "executive_summary": summary,
-            "data_sources": candidate.get("sources", []),
-            "character_report": char,
-            "financial_assessment": fin,
-        }
-
-        reports.append(report)
-
-    # Sort by overall score
-    reports.sort(key=lambda r: r["overall_score"], reverse=True)
-
-    state["scouting_reports"] = state.get("scouting_reports", []) + reports
-    state["messages"] = [
-        AIMessage(content=f"📋 Generated {len(reports)} scouting reports. "
-                          f"Top candidate: {reports[0]['player_name']} "
-                          f"({reports[0]['overall_score']}/100 — {reports[0]['verdict']})"
-                          if reports else "No reports generated.")
-    ]
-
-    return state
+    top = reports[0] if reports else None
+    msg = (f"Wrote {len(reports)} reports. Top: {top.player_name} ({top.overall_score}/100, {top.verdict})"
+           if top else "No verified candidates to report on.")
+    return {"scouting_reports": [r.model_dump() for r in reports], "messages": [msg], "errors": errors}
 
 
-def _calculate_tactical_fit(stats: Dict, tactical_system: str) -> float:
-    """Calculate how well a player fits the tactical system (0-100)."""
-    system = (tactical_system or "general").lower()
-    score = 40.0
-
-    if "slot" in system or "4-3-3" in system or "inverted" in system:
-        # Arne Slot: progressive, technical, disciplined pressing
-        score += stats.get("xT_p90", 0) * 25
-        score += stats.get("progressive_carries_p90", 0) * 4
-        score += stats.get("pressing_success_pct", 0) * 0.4
-        score += stats.get("passes_into_penalty_area_p90", 0) * 5
-
-    elif "guardiola" in system or "possession" in system or "city" in system:
-        # Pep: passing, creativity, ball retention
-        score += stats.get("pv_plus", 0) * 35
-        score += stats.get("shot_creating_actions_p90", 0) * 6
-        score += stats.get("progressive_passes_p90", 0) * 3
-        score += stats.get("passes_into_penalty_area_p90", 0) * 4
-
-    elif "arteta" in system or "arsenal" in system:
-        # Arteta: positional play, versatility, high work rate
-        score += stats.get("xT_p90", 0) * 20
-        score += stats.get("progressive_carries_p90", 0) * 3
-        score += stats.get("tackles_p90", 0) * 4
-        score += stats.get("pressing_success_pct", 0) * 0.4
-
-    elif "conte" in system or "3-5-2" in system or "3-4-3" in system:
-        # Conte: intensity, physicality, defensive contribution
-        score += stats.get("tackles_p90", 0) * 5
-        score += stats.get("interceptions_p90", 0) * 4
-        score += stats.get("high_intensity_sprints_p90", 0) * 1
-        score += stats.get("goals_p90", 0) * 15
-
-    else:
-        # General fit
-        score += (stats.get("goals_p90", 0) + stats.get("assists_p90", 0)) * 20
-        score += stats.get("xT_p90", 0) * 15
-        score += stats.get("tackles_p90", 0) * 3
-
-    return min(score, 100.0)
+def verdict(overall: float, injury_risk: float, feasibility: str) -> str:
+    if feasibility == "Over budget":
+        return "NO-GO"
+    if overall >= 70 and injury_risk < 5:
+        return "GO"
+    if overall >= 50:
+        return "CAUTION"
+    return "NO-GO"
 
 
-def _calculate_statistical_rating(stats: Dict) -> float:
-    """Calculate overall statistical quality (0-100)."""
-    rating = (
-        stats.get("goals_p90", 0) * 16 +
-        stats.get("assists_p90", 0) * 14 +
-        stats.get("xG_p90", 0) * 12 +
-        stats.get("xA_p90", 0) * 10 +
-        stats.get("xT_p90", 0) * 8 +
-        stats.get("shot_creating_actions_p90", 0) * 3 +
-        stats.get("progressive_carries_p90", 0) * 2 +
-        stats.get("tackles_p90", 0) * 2 +
-        stats.get("pressing_success_pct", 0) * 0.3
+def strengths(s: Dict) -> List[str]:
+    out = []
+    if s.get("npxG_p90", 0) >= 0.4:
+        out.append(f"High-quality chances: {s['npxG_p90']:.2f} npxG/90")
+    if s.get("goals_p90", 0) > s.get("xG_p90", 0) * 1.15 and s.get("goals", 0) >= 5:
+        out.append("Finishing above expectation (goals > xG)")
+    if s.get("xA_p90", 0) >= 0.25:
+        out.append(f"Chance creator: {s['xA_p90']:.2f} xA/90")
+    if s.get("key_passes_p90", 0) >= 2.0:
+        out.append(f"{s['key_passes_p90']:.1f} key passes/90")
+    if s.get("xGChain_p90", 0) >= 0.6:
+        out.append("Heavily involved in attacking moves (xGChain)")
+    if s.get("xGBuildup_p90", 0) >= 0.35:
+        out.append("Strong contributor to build-up play")
+    if (s.get("ea_pace") or 0) >= 88:
+        out.append(f"Elite pace (EA FC {s['ea_pace']})")
+    return out[:5] or ["Balanced statistical profile"]
+
+
+def weaknesses(s: Dict, family: str) -> List[str]:
+    out = []
+    if s.get("xG_p90", 0) >= 0.2 and s.get("goals_p90", 0) < s.get("xG_p90", 0) * 0.75:
+        out.append("Finishing below expectation (goals < xG)")
+    if family == "forward" and s.get("npxG_p90", 0) < 0.15 and s.get("xA_p90", 0) < 0.15:
+        out.append("Low end product for a forward")
+    if s.get("minutes_played", 0) < 900:
+        out.append(f"Small sample: {s.get('minutes_played', 0)} minutes")
+    if s.get("league_coefficient", 1.0) < 0.85:
+        out.append("League adjustment applied: output discounted for PL equivalence")
+    return out[:4] or ["No major statistical weaknesses"]
+
+
+def risks(char: CharacterReport, fin: FinancialAssessment) -> List[str]:
+    out = []
+    if char.attitude_score < 6:
+        out.append("Character concerns in news coverage")
+    if char.discipline_issues:
+        out.append(f"Discipline: {len(char.discipline_issues)} issue(s)")
+    if char.injury_risk_score > 6:
+        out.append("High injury risk from recent history")
+    elif char.injury_risk_score > 4:
+        out.append("Moderate injury concerns")
+    if fin.years_remaining is not None and fin.years_remaining < 1.5:
+        out.append("Contract near expiry")
+    if fin.current_market_value_eur > 70:
+        out.append("Premium fee (EUR 70M+)")
+    if fin.market_value_is_estimate:
+        out.append("Market value is a model estimate, not Transfermarkt")
+    if fin.transfer_feasibility == "Over budget":
+        out.append("Exceeds budget")
+    return out or ["No major risk factors identified"]
+
+
+async def summarise(reports: List[ScoutingReport], c: SearchConstraints) -> Dict[str, str]:
+    facts = [{
+        "player_id": r.player_id, "name": r.player_name, "age": r.age, "team": r.team, "league": r.league,
+        "verdict": r.verdict, "overall": r.overall_score, "tactical_fit": r.tactical_fit_score,
+        "key_stats": r.key_stats, "strengths": r.strengths, "weaknesses": r.weaknesses, "risks": r.risk_factors,
+        "market_value_m": r.financial_assessment.current_market_value_eur if r.financial_assessment else None,
+    } for r in reports]
+    out = await llm.structured(
+        ExecutiveSummaries,
+        [SystemMessage(content=SUMMARY_SYSTEM_PROMPT),
+         HumanMessage(content=json.dumps({"system": c.tactical_system or "general", "position": c.position,
+                                          "players": facts}, default=str))],
+        name="report_writer.summaries",
+        temperature=0.3,
     )
-    return min(rating, 100.0)
+    return {s.player_id: s.summary for s in out.summaries}
 
 
-def _identify_strengths(stats: Dict) -> List[str]:
-    """Identify top strengths from statistics."""
-    strengths = []
-    if stats.get("goals_p90", 0) > 0.5:
-        strengths.append("Elite goal-scoring output")
-    if stats.get("xG_p90", 0) > 0.4 and stats.get("goals_p90", 0) > stats.get("xG_p90", 0):
-        strengths.append("Clinical finisher — outperforms xG")
-    if stats.get("assists_p90", 0) > 0.35:
-        strengths.append("High-level chance creation")
-    if stats.get("xT_p90", 0) > 0.45:
-        strengths.append("Exceptional progressive threat")
-    if stats.get("progressive_carries_p90", 0) > 5.0:
-        strengths.append("Elite ball-carrying ability")
-    if stats.get("pressing_success_pct", 0) > 32:
-        strengths.append("Effective high pressing")
-    if stats.get("tackles_p90", 0) > 2.5:
-        strengths.append("Strong defensive contribution")
-    if stats.get("high_intensity_sprints_p90", 0) > 22:
-        strengths.append("Outstanding physical output")
-    if stats.get("ea_overall", 0) > 82:
-        strengths.append(f"EA FC rating: {stats.get('ea_overall')} — elite tier")
-    if not strengths:
-        strengths.append("Balanced statistical profile")
-    return strengths[:5]
-
-
-def _identify_weaknesses(stats: Dict) -> List[str]:
-    """Identify potential weaknesses."""
-    weaknesses = []
-    if stats.get("defensive_duel_win_rate", 0) > 0 and stats.get("defensive_duel_win_rate", 0) < 45:
-        weaknesses.append("Below-average defensive duels")
-    if stats.get("tackles_p90", 0) < 0.8 and "midfielder" in stats.get("position", "").lower():
-        weaknesses.append("Limited defensive contribution for a midfielder")
-    if stats.get("pressing_success_pct", 0) > 0 and stats.get("pressing_success_pct", 0) < 25:
-        weaknesses.append("Pressing intensity needs improvement")
-    if stats.get("goals_p90", 0) < stats.get("xG_p90", 0) * 0.75:
-        weaknesses.append("Underperforming xG — finishing concerns")
-    if stats.get("league_coefficient", 1.0) < 0.7:
-        weaknesses.append("Playing in a weaker league — adaptation risk")
-    if not weaknesses:
-        weaknesses.append("No major weaknesses identified")
-    return weaknesses[:4]
-
-
-def _identify_risks(char: Dict, fin: Dict, injury_risk: float) -> List[str]:
-    """Compile risk factors."""
-    risks = []
-    if char.get("attitude_score", 10) < 6:
-        risks.append("Character concerns flagged by media analysis")
-    if char.get("discipline_issues"):
-        count = len(char["discipline_issues"])
-        risks.append(f"Discipline history: {count} incident(s)")
-    if injury_risk > 6:
-        risks.append("HIGH injury risk — recurring issues in 24-month history")
-    elif injury_risk > 4:
-        risks.append("Moderate injury concerns")
-    if fin.get("years_remaining", 5) < 1.5:
-        risks.append("Contract near expiry — limited resale protection")
-    if fin.get("current_market_value_eur", 0) > 70:
-        risks.append("Premium fee required (€70M+)")
-    if fin.get("transfer_feasibility") == "Over budget":
-        risks.append("Exceeds specified budget")
-    if not risks:
-        risks.append("No major risk factors identified")
-    return risks
-
-
-def _generate_summary(candidate: Dict, char: Dict, fin: Dict, system: str) -> str:
-    """Generate a narrative executive summary via Gemini."""
-    if not settings.has_gemini():
-        return f"{candidate.get('name', 'Player')} presents a {'strong' if fin.get('value_for_money_score', 0) > 60 else 'moderate'} transfer target option."
-
-    try:
-        llm = ChatGoogleGenerativeAI(
-            model=settings.GEMINI_MODEL,
-            google_api_key=settings.GOOGLE_API_KEY,
-            temperature=0.3,
-        )
-
-        stats_summary = (
-            f"Goals/90: {candidate.get('goals_p90', 0)}, Assists/90: {candidate.get('assists_p90', 0)}, "
-            f"xG/90: {candidate.get('xG_p90', 0)}, xA/90: {candidate.get('xA_p90', 0)}, "
-            f"xT/90: {candidate.get('xT_p90', 0)}, Tackles/90: {candidate.get('tackles_p90', 0)}, "
-            f"Pressing: {candidate.get('pressing_success_pct', 0)}%"
-        )
-
-        prompt = REPORT_PROMPT.format(
-            player_name=candidate.get("name", "Unknown"),
-            age=candidate.get("age", "?"),
-            position=candidate.get("position", "?"),
-            team=candidate.get("team", "?"),
-            league=candidate.get("league", "?"),
-            stats_summary=stats_summary,
-            attitude_score=char.get("attitude_score", 7.5),
-            discipline_issues=", ".join(char.get("discipline_issues", [])) or "None",
-            injury_risk=char.get("injury_risk_score", 2),
-            total_days_injured=char.get("total_days_injured_24mo", 0),
-            market_value=fin.get("current_market_value_eur", 0),
-            years_remaining=fin.get("years_remaining", "?"),
-            vfm_score=fin.get("value_for_money_score", 50),
-            feasibility=fin.get("transfer_feasibility", "Unknown"),
-            tactical_system=system or "General",
-        )
-
-        response = llm.invoke([HumanMessage(content=prompt)])
-        return response.content.strip()
-
-    except Exception as e:
-        logger.debug(f"LLM summary generation failed: {e}")
-        return f"{candidate.get('name', 'Player')} from {candidate.get('team', '?')} in the {candidate.get('league', '?')}."
+def template_summary(r: ScoutingReport) -> str:
+    return (f"{r.player_name} ({r.team}) scores {r.overall_score}/100 with a tactical fit of "
+            f"{r.tactical_fit_score}/100. Main strength: {r.strengths[0]}. "
+            f"Main risk: {r.risk_factors[0]}. Verdict: {r.verdict}.")
