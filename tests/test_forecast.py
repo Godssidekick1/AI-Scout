@@ -273,3 +273,49 @@ def test_understat_maintenance_page_detected():
     from data_sources.understat_source import UnderstatSource
     assert UnderstatSource.is_maintenance_page("<html><body><h1>We will come back soon</h1></body></html>")
     assert not UnderstatSource.is_maintenance_page("<script>var playersData = JSON.parse('[]')</script>")
+
+
+def test_archive_validation_checks_season_and_completeness():
+    from forecast.data import understat_archive as ua
+
+    def page(dates, players=({"id": "1", "player_name": "A"},)):
+        enc = lambda x: json.dumps(list(x)).replace("'", "\'")
+        return (f"<script>var datesData = JSON.parse('{enc(dates)}');"
+                f"var playersData = JSON.parse('{enc(players)}');</script>")
+
+    done = [{"datetime": "2019-08-09 20:00:00", "isResult": True}, {"datetime": "2020-07-26 15:00:00", "isResult": True}]
+    assert ua.validate(page(done), 2019)[1] == "ok"
+    assert ua.validate(page(done), 2020)[1] == "page shows season 2019"
+    unfinished = done + [{"datetime": "2020-07-27 15:00:00", "isResult": False}] * 3
+    assert "not yet played" in ua.validate(page(unfinished), 2019)[1]
+    cands = ua.candidates([["20200729000000", "https://understat.com/league/EPL/2019"],
+                           ["20200301000000", "https://understat.com/league/EPL/2019"],   # mid-season: skipped
+                           ["20160620000000", "https://understat.com/league/Ligue_1"],     # yearless, June: 2015
+                           ["20161001000000", "https://understat.com/league/Ligue_1"]])    # yearless, autumn: skipped
+    assert cands == {("EPL", 2019): [("20200729000000", "https://understat.com/league/EPL/2019")],
+                     ("Ligue_1", 2015): [("20160620000000", "https://understat.com/league/Ligue_1")]}
+
+
+def test_results_elo_rates_and_handles_promotion(monkeypatch):
+    from forecast.data import results_elo
+
+    def fake(league, season):
+        teams = ["A", "B", "C"] if season < 2014 else ["A", "B", "D"]   # C relegated, D promoted in 2014
+        rows = [(teams[0], teams[1], 3, 0), (teams[0], teams[2], 2, 0), (teams[1], teams[2], 1, 1)]
+        return pd.DataFrame(rows, columns=["HomeTeam", "AwayTeam", "FTHG", "FTAG"])
+
+    monkeypatch.setattr(results_elo, "load_results", fake)
+    table = results_elo.rate_league("premier_league", [2014])[2014]
+    assert table["A"] > 1500 > table["D"]
+    snap = results_elo.snapshots([2014], leagues=["premier_league"])[2014]
+    assert snap["A"]["country"] == "ENG"
+    assert clubelo.match_team("A", "premier_league", snap) == "A"
+
+
+def test_transfermarkt_matcher_rejects_one_word_subset_without_club():
+    players = pd.DataFrame({"player_id": [1, 2], "name": ["Alex", "Kepa Arrizabalaga"]})
+    vals = pd.DataFrame({"player_id": [2], "date": ["2025-09-01"], "market_value_in_eur": [1e6],
+                         "current_club_name": ["Arsenal FC"]})
+    m = PlayerMatcher(players, vals)
+    assert m.match("Alex Berenguer", "Athletic Club", 2025) is None      # 'Alex' alone is not him
+    assert m.match("Kepa", "Arsenal", 2025) == 2                          # known-as name, club agrees

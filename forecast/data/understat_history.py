@@ -11,6 +11,7 @@ uses the normal 24h cache.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from typing import Dict, Iterable, List
 
@@ -40,10 +41,10 @@ def rows_from_raw(raw: Iterable[Dict], league: str, season: int) -> List[Dict]:
     listed once with both teams joined by a comma; we keep the last team."""
     out = []
     for p in raw:
-        name = p.get("player_name") or p.get("name")
+        name = html.unescape(p.get("player_name") or p.get("name") or "")   # "N&#039;Goumou" -> "N'Goumou"
         if not name or p.get("id") is None:
             continue
-        team = (p.get("team_title") or "").split(",")[-1].strip()
+        team = html.unescape((p.get("team_title") or "").split(",")[-1].strip())
         out.append({
             "us_id": str(p["id"]), "name": name, "team": team, "league": league, "season": season,
             "understat_position": p.get("position", ""),

@@ -90,6 +90,8 @@ python -m forecast.build              # download data, backtest, fit, save (need
                                       # api.clubelo.com and the Transfermarkt dataset host)
 python -m forecast.build --synthetic  # same pipeline on generated data, offline
 python -m forecast.build --check      # check that understat.com, the Transfermarkt dataset and ClubElo are reachable
+python -m forecast.data.understat_archive  # rebuild Understat history from Internet Archive copies when understat.com is down
+python -m forecast.build --elo results  # team strength from football-data.co.uk results instead of ClubElo
 ```
 
 The agent loads the saved model automatically. Without it, the pipeline runs exactly as before.

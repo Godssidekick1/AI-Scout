@@ -104,11 +104,15 @@ class PlayerMatcher:
         best, best_score = None, 0
         target = normalise(name)
         for pid in candidates:
-            score = fuzz.token_sort_ratio(target, normalise(self.players.at[pid, "name"]))
-            # Understat sometimes lists only a known-as name ('Rodri'): token_set covers that.
-            score = max(score, fuzz.token_set_ratio(target, normalise(self.players.at[pid, "name"])) - 5)
-            if team and season is not None:
-                score += self._club_bonus(pid, team, season)
+            other = normalise(self.players.at[pid, "name"])
+            bonus = self._club_bonus(pid, team, season) if team and season is not None else 0
+            score = fuzz.token_sort_ratio(target, other)
+            # Understat sometimes lists only a known-as name ('Rodri', 'Kepa'): token_set covers that, but a
+            # one-word name is a subset of thousands of others ('Alex', 'Max'), so only trust it when the
+            # club history agrees.
+            if bonus:
+                score = max(score, fuzz.token_set_ratio(target, other) - 5)
+            score += bonus
             if score > best_score:
                 best, best_score = pid, score
         return best if best_score >= min_score else None

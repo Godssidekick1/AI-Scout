@@ -26,7 +26,7 @@ import pandas as pd
 
 from config import current_understat_season
 from forecast import backtest
-from forecast.config import METRICS
+from forecast.config import LEAGUES, METRICS
 from forecast.model import MinutesModel, ProjectionModel, prepare
 from forecast.service import ForecastService
 from forecast.table import player_seasons, season_pairs
@@ -35,7 +35,7 @@ logger = logging.getLogger("forecast.build")
 RESULTS = Path(__file__).resolve().parent.parent / "evals" / "results"
 
 
-def load_real(seasons: List[int]) -> Tuple[pd.DataFrame, Dict[str, float]]:
+def load_real(seasons: List[int], elo_source: str = "auto") -> Tuple[pd.DataFrame, Dict[str, float]]:
     from forecast.data import clubelo, transfermarkt
     from forecast.data.understat_history import load_seasons
 
@@ -48,11 +48,7 @@ def load_real(seasons: List[int]) -> Tuple[pd.DataFrame, Dict[str, float]]:
     players, valuations = transfermarkt.load("players"), transfermarkt.load("player_valuations")
     us_to_tm = transfermarkt.match_players(us, players, valuations)
 
-    try:
-        snapshots = {s: clubelo.fetch_snapshot(clubelo.season_start(s)) for s in seasons}
-    except clubelo.ClubEloUnavailable as e:
-        raise SystemExit(f"ClubElo ratings unavailable: {e}. The API is sometimes down; "
-                         "rerun later (Understat and Transfermarkt downloads stay cached).")
+    snapshots = team_ratings(seasons, elo_source)
     teams = set(zip(us["team"], us["league"], us["season"]))
     team_elo = clubelo.team_elo_table(teams, snapshots)
 
@@ -60,6 +56,27 @@ def load_real(seasons: List[int]) -> Tuple[pd.DataFrame, Dict[str, float]]:
     latest_values = transfermarkt.value_at(valuations, dt.date.today().isoformat())
     values = {u: latest_values.get(t) for u, t in us_to_tm.items() if t is not None and t in latest_values}
     return ps, values
+
+
+ELO_USED = {"source": "clubelo"}
+
+
+def team_ratings(seasons: List[int], source: str = "auto") -> Dict[int, Dict[str, Dict]]:
+    """Season-start team ratings: ClubElo, or our own Elo from results (forecast/data/results_elo.py)
+    when ClubElo is down ('auto') or when asked for ('results')."""
+    from forecast.data import clubelo, results_elo
+
+    if source in ("auto", "clubelo"):
+        try:
+            snaps = {s: clubelo.fetch_snapshot(clubelo.season_start(s)) for s in seasons}
+            ELO_USED["source"] = "clubelo"
+            return snaps
+        except clubelo.ClubEloUnavailable as e:
+            if source == "clubelo":
+                raise SystemExit(f"ClubElo ratings unavailable: {e}. Rerun later, or use --elo results.")
+            logger.warning("ClubElo unavailable (%s); using Elo computed from match results instead", e)
+    ELO_USED["source"] = "results"
+    return results_elo.snapshots(seasons)
 
 
 def check_sources() -> bool:
@@ -103,10 +120,19 @@ def load_synthetic(seed: int = 7) -> Tuple[pd.DataFrame, Dict[str, float]]:
     return ps, values
 
 
-def report(res: Dict[str, pd.DataFrame], model: ProjectionModel, synthetic: bool, test_seasons: List[int]) -> str:
+def report(res: Dict[str, pd.DataFrame], model: ProjectionModel, synthetic: bool, test_seasons: List[int],
+           ps: Optional[pd.DataFrame] = None) -> str:
     lines = [f"# Forecast backtest ({dt.date.today().isoformat()})", ""]
     if synthetic:
         lines += ["> Synthetic data: this checks the code, not football. Real numbers come from a real build.", ""]
+    elif ELO_USED["source"] == "results":
+        lines += ["> Team strength: Elo computed from domestic results (football-data.co.uk), not ClubElo, "
+                  "so dElo is not comparable across leagues.", ""]
+    if ps is not None and not synthetic:
+        have = set(zip(ps["league"], ps["season"]))
+        seasons = range(int(ps["season"].min()), int(ps["season"].max()) + 1)
+        gaps = [f"{lg} {s}" for lg in LEAGUES for s in seasons if (lg, s) not in have]
+        lines += [f"Data: {len(have)} league-seasons loaded" + (f"; missing: {', '.join(gaps)}." if gaps else "."), ""]
     lines += [f"Test seasons (target): {', '.join(map(str, test_seasons))}. Error = minutes-weighted RMSE of per-90 "
               "predictions; lower is better.", ""]
     for subset, title in (("all", "All players"), ("movers", "Players who changed club"),
@@ -126,6 +152,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--synthetic", action="store_true", help="use generated data (offline demo)")
     ap.add_argument("--check", action="store_true", help="only check that the data sources are reachable")
+    ap.add_argument("--elo", choices=("auto", "clubelo", "results"), default="auto",
+                    help="team ratings: ClubElo, Elo from match results, or ClubElo with results as fallback")
     ap.add_argument("--first-season", type=int, default=2014)
     ap.add_argument("--test-seasons", type=int, default=4, help="how many recent completed seasons to test on")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -139,7 +167,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.synthetic:
         ps, values = load_synthetic()
     else:
-        ps, values = load_real(list(range(args.first_season, current + 1)))
+        ps, values = load_real(list(range(args.first_season, current + 1)), args.elo)
 
     pairs = season_pairs(ps)
     completed = pairs[pairs["target_season"] < current] if not args.synthetic else pairs
@@ -151,7 +179,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     model = ProjectionModel().fit(full, hist)
     minutes = MinutesModel().fit(full, ps)
 
-    text = report(res, model, args.synthetic, test_seasons)
+    text = report(res, model, args.synthetic, test_seasons, ps)
     RESULTS.mkdir(parents=True, exist_ok=True)
     out = RESULTS / f"backtest_{'synthetic_' if args.synthetic else ''}{dt.date.today().isoformat()}.md"
     out.write_text(text)
