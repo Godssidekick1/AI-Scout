@@ -65,6 +65,9 @@ class ScoutingReport(BaseModel):
     benchmark_comparison: Dict[str, float] = Field(default_factory=dict)
 
     key_stats: Dict[str, float] = Field(default_factory=dict)
+    projection: Dict[str, float] = Field(default_factory=dict)   # model forecast at the target club, with 80% range
+    role_score: Optional[float] = None
+    value_gap: Optional[float] = None
     character_report: Optional[CharacterReport] = None
     financial_assessment: Optional[FinancialAssessment] = None
     executive_summary: str = ""

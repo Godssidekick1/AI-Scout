@@ -30,6 +30,8 @@ SUMMARY_SYSTEM_PROMPT = """You are a Premier League chief scout.
 For each player in the JSON, write a 3-4 sentence executive summary: tactical fit for the
 stated system, the #1 strength, the #1 risk, and a clear recommendation consistent with
 the verdict. Use only the facts provided; do not add stats, injuries or history.
+When projection_next_season is present, it is the forecast model's per-90 output next season at the
+target club (pred_ with an 80% range lo_ to hi_). Mention the most relevant projection and its range.
 Return one summary per player_id."""
 
 KEY_STATS = ["minutes_played", "goals", "assists", "npxG_p90", "xA_p90", "key_passes_p90",
@@ -51,6 +53,8 @@ async def write_reports(state: Dict) -> Dict:
 
     benchmark = await get_context().find_player(c.benchmark_player) if c.benchmark_player else None
 
+    gaps = value_gaps(candidates, fins)
+
     reports: List[ScoutingReport] = []
     for cand in candidates:
         pid = cand["player_id"]
@@ -59,6 +63,9 @@ async def write_reports(state: Dict) -> Dict:
 
         fit, coverage = tactical_fit(cand, c.tactical_system)
         stat = statistical_rating(cand, family)
+        if cand.get("role_score") is not None:
+            # The forecast model's role score replaces the raw-stat rating: 0 (average in role) -> 50.
+            stat = round(min(max(50 + 15 * cand["role_score"], 0), 100), 1)
         overall = round(
             fit * WEIGHTS["tactical"]
             + stat * WEIGHTS["statistical"]
@@ -89,6 +96,9 @@ async def write_reports(state: Dict) -> Dict:
             similar_players=[p["name"] for p in engine.find_similar(cand, n=3, exclude_id=pid)],
             benchmark_comparison={benchmark["name"]: cosine_similarity(cand, benchmark)} if benchmark else {},
             key_stats={k: cand.get(k, 0) for k in KEY_STATS},
+            projection=cand.get("projection") or {},
+            role_score=cand.get("role_score"),
+            value_gap=gaps.get(pid),
             character_report=char,
             financial_assessment=fin,
             data_sources=sorted(set(cand.get("sources", []) + char.sources)),
@@ -109,6 +119,23 @@ async def write_reports(state: Dict) -> Dict:
     msg = (f"Wrote {len(reports)} reports. Top: {top.player_name} ({top.overall_score}/100, {top.verdict})"
            if top else "No verified candidates to report on.")
     return {"scouting_reports": [r.model_dump() for r in reports], "messages": [msg], "errors": errors}
+
+
+def value_gaps(candidates: List[Dict], fins: Dict) -> Dict[str, float]:
+    """For candidates with a model role score and a market value: how cheap each looks for
+    his projected output, relative to the others (see forecast.roles.value_gap)."""
+    import numpy as np
+    from forecast.roles import value_gap
+    ids, scores, values = [], [], []
+    for cand in candidates:
+        fin = fins.get(cand["player_id"]) or {}
+        value = fin.get("current_market_value_eur") or cand.get("market_value_eur_m")
+        if cand.get("role_score") is not None and value:
+            ids.append(cand["player_id"]); scores.append(cand["role_score"]); values.append(float(value))
+    if len(ids) < 3:
+        return {}
+    gaps = value_gap(np.array(scores, float), np.array(values, float))
+    return {i: round(float(g), 2) for i, g in zip(ids, gaps) if g == g}
 
 
 def verdict(overall: float, injury_risk: float, feasibility: str) -> str:
@@ -180,6 +207,7 @@ async def summarise(reports: List[ScoutingReport], c: SearchConstraints) -> Dict
         "verdict": r.verdict, "overall": r.overall_score, "tactical_fit": r.tactical_fit_score,
         "key_stats": r.key_stats, "strengths": r.strengths, "weaknesses": r.weaknesses, "risks": r.risk_factors,
         "market_value_m": r.financial_assessment.current_market_value_eur if r.financial_assessment else None,
+        "projection_next_season": r.projection or None, "role_score": r.role_score,
     } for r in reports]
     out = await llm.structured(
         ExecutiveSummaries,

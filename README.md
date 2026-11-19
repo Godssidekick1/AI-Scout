@@ -8,7 +8,7 @@ python main.py "Find an inverted winger for Slot's Liverpool 4-3-3, under 25, bu
 
 It parses the brief, lets a Gemini agent search real league data with tools, checks every name it proposes against that data and the constraints, loops back if too few survive, runs background and financial checks in parallel, and writes ranked reports with a GO / CAUTION / NO-GO verdict.
 
-Built with LangGraph, Gemini (structured output + tool calling), Understat, Transfermarkt, FUTWIZ and Serper.
+Built with LangGraph, Gemini (structured output + tool calling), a backtested forecast model (numpy/pandas), ChromaDB, Understat, Transfermarkt, ClubElo, FUTWIZ and Serper.
 
 ---
 
@@ -28,7 +28,7 @@ graph TD
 | Step | Type | What it does |
 | --- | --- | --- |
 | `request_parser` | LLM, structured | Turns the brief into a validated `SearchConstraints` (role, system, budget, max age, leagues, benchmark). Falls back to keyword rules with no key or on failure. |
-| `player_finder` | **Agent** | Gemini decides which tools to call and when it's done: `search_league_players`, `get_player_stats`, `get_market_profile`, then `submit_candidates`. Capped at 8 turns. Independent tool calls in one turn run concurrently. Without a key, a deterministic baseline (top xGChain/90 in the role) runs instead. |
+| `player_finder` | **Agent** | Gemini decides which tools to call and when it's done: `find_role_candidates` and `project_player` (the forecast model, when built), `search_league_players`, `get_player_stats`, `get_market_profile`, then `submit_candidates`. It is told to chase value, not names: if candidates are all expensive, search again cheaper or younger. Capped at 8 turns. Independent tool calls in one turn run concurrently. Without a key, a deterministic baseline runs instead (the model's top role scores, or top xGChain/90 without a model). |
 | `verifier` | Deterministic critic | Every proposed name must resolve to a real Understat record, have enough minutes, play the role, be in a target league, and meet age and budget. Rejections are recorded with reasons and fed back to the finder on the next attempt (max 3 attempts). |
 | `background_checker` | Parallel branch | Injury history (Transfermarkt), news (Serper), and a cheap-model structured read of the news for character signals. Card counts from Understat. |
 | `financial_analyst` | Parallel branch | Market value, contract length, wage estimate, value-for-money and feasibility. Pure Python. |
@@ -44,7 +44,7 @@ graph TD
 | Character signals | Serper news + Gemini Flash-Lite | Only from the retrieved snippets; snippets are passed as delimited data. |
 | Candidate names | Gemini agent | Proposals only. Nothing an LLM says reaches a report unless the verifier confirms it in real data. |
 
-Per-90 stats are adjusted to Premier League equivalence with league coefficients (`analysis/league_normalizer.py`).
+When the forecast model is built, each verified candidate also gets a projection for next season at the target club with an 80% range, and the model's role score replaces the raw-stat rating in the overall score. Without it, per-90 stats are adjusted with the old hand-set league coefficients (`analysis/league_normalizer.py`).
 
 ### Scoring
 
@@ -62,6 +62,38 @@ All scores are deterministic and explainable (`analysis/tactical_fit.py`):
 Live objects (data-source clients, the per-run fetch memo, the trace) live in a `ContextVar` (`core/context.py`, `core/tracing.py`), not in graph state. The memo means a player's Transfermarkt profile is fetched once per run even though three steps use it.
 
 ---
+
+## The forecast model (v3)
+
+The agent's judgement now rests on a model fitted on past seasons. For player *i*, metric *m* (per 90), next season at club *t*:
+
+```
+y_hat = theta * (1 + lambda[league change, m, position group]   league tax
+                   + beta_m  * dElo / 100                      team strength (ClubElo)
+                   + gamma_m * dUsage                          expected change in his share of the team's output
+                   + a_m * age_step(position group, age)       position age curve (delta method)
+                   + d_m * trend / theta)                      his own recent trajectory
+```
+
+- **theta (ability)**: recency-weighted per-90 history, shrunk toward his position group's mean (empirical Bayes; the shrinkage strength is fitted per metric).
+- **Relative effects**: a coefficient reads as "moving from Ligue 1 to the Premier League changes a striker's npxG/90 by X%".
+- **Partial pooling**: one league effect per metric plus a more heavily penalised deviation per position group (weighted ridge).
+- **Ranges**: every projection has an 80% interval whose width depends on minutes; expected minutes come from a separate model.
+- **Metrics**: npxG, xA, shots, key passes, xGChain, xGBuildup (Understat). Scope: the big five, 2014/15 onward.
+
+**Backtest.** `forecast/backtest.py` refits on past seasons only and predicts each later season, adding one term at a time against three baselines: *same as last season*, the old hand-set league coefficients, and ability only. A term stays if it lowers out-of-sample error. The report also gives 80%-interval coverage and the minutes model's error.
+
+**Role search.** A brief becomes a role profile (`forecast/roles.py`, e.g. a John Stones replacement is `ball_playing_cb`). Retrieval finds players whose style vector (the shape of their output, level removed) is closest to the role, from a ChromaDB index. They are projected to the target club and ranked by role score, with a **value gap**: how cheap a player looks for his projected output. That is how the agent hunts for under-priced players rather than famous names.
+
+```bash
+python -m forecast.build              # download data, backtest, fit, save (needs access to understat.com,
+                                      # api.clubelo.com and the Transfermarkt dataset host)
+python -m forecast.build --synthetic  # same pipeline on generated data, offline
+```
+
+The agent loads the saved model automatically. Without it, the pipeline runs exactly as before.
+
+Data: Understat (xG family), [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets) (CC0: ages, positions, values, transfers), ClubElo (team strength). Design rationale and the research behind each term are in the project's design doc.
 
 ## Reliability, cost and observability
 
@@ -97,7 +129,7 @@ Key settings (env or `.env`): `GEMINI_MODEL`, `GEMINI_FAST_MODEL`, `MAX_CONCURRE
 pytest -q
 ```
 
-57 offline tests (fictional fixture data, fake Gemini). They cover: no duplicated reports and id-based joins, each node running once with the checks fanned out, hallucinated names being rejected and the finder retrying with feedback, the loop stopping at max attempts, age/budget/minutes/role constraints, one Transfermarkt fetch per player across agents, the agent falling back when it never submits, LLM outages degrading gracefully, concurrent per-player work, LLM retries / validation / caching / cost accounting, and the parsers and scoring maths. CI runs them on every push (`.github/workflows/ci.yml`).
+85 offline tests (fictional fixture data, fake Gemini, synthetic league history with known true parameters). They cover: no duplicated reports and id-based joins, each node running once with the checks fanned out, hallucinated names being rejected and the finder retrying with feedback, the loop stopping at max attempts, age/budget/minutes/role constraints, one Transfermarkt fetch per player across agents, the agent falling back when it never submits, LLM outages degrading gracefully, concurrent per-player work, LLM retries / validation / caching / cost accounting, and the parsers and scoring maths. The forecast tests check that fitting recovers the true league and team effects and age-curve shapes, that the full model beats both baselines in the backtest with calibrated intervals, that the backtest never trains on its test season, and the role search filters and ranking. CI runs them on every push (`.github/workflows/ci.yml`).
 
 ## Evals
 
@@ -126,7 +158,8 @@ The golden set includes an adversarial prompt-injection query. Results are saved
 - **The LLM proposes, data decides.** The agent never supplies stats. A name that doesn't resolve in Understat is rejected with a reason, which also makes hallucination measurable (`acceptance_rate`).
 - **Deterministic scoring.** Scores come from transparent formulas over real numbers, not from asking the LLM for a number. The LLM writes prose about scores it was given.
 - **Top five leagues only.** That's what Understat covers. Players elsewhere can't be verified, so they are rejected rather than scored on guesses.
-- **numpy instead of a vector database.** A pool of 10-20 players doesn't need one.
+- **A model, not hand-set coefficients.** League tax, team strength, usage and age are fitted on past seasons and must earn their place in a backtest. The LLM can call the model but never changes its numbers.
+- **ChromaDB for role search.** Every current player's style vector, filtered by position group, rebuilt only when the data changes. A numpy fallback keeps it working without ChromaDB.
 
 ## Limitations
 
@@ -134,7 +167,10 @@ The golden set includes an adversarial prompt-injection query. Results are saved
 - Understat's endpoint has changed before; `data_sources/understat_source.py` tries the JSON endpoint, then the older embedded-HTML format.
 - Age comes from Transfermarkt; if it's missing the agent's claimed age is used and marked `age_source: llm_claim`.
 - Wage and fallback market-value figures are heuristics.
-- League coefficients are hand-set approximations.
+- The forecast model's real fit needs network access to the data sources; the numbers in tests are from synthetic data.
+- Free data has no defensive actions, progressive passes or carries, aerials or keeper distribution. Defender and keeper roles use xGBuildup as a proxy, and goalkeepers are not modelled.
+- The Transfermarkt dataset is frozen at July 2026; current values come from the live scraper.
+- Players who leave the big five drop out of the training data, so projections are conditional on the player staying in it.
 
 ## Project structure
 
@@ -157,6 +193,16 @@ data_sources/               understat, transfermarkt, ea_fc_ratings, news_search
 analysis/                   tactical_fit, league_normalizer, player_comparison
                             (metrics_calculator: xT helpers, tested but unused; needs event data)
 models/                     pydantic schemas for LLM I/O, candidates, reports, graph state
+forecast/
+  data/                     Understat history, Transfermarkt dataset + player matching, ClubElo
+  table.py                  player-season table and season pairs
+  model.py                  projection model (ability, league, team, usage, age, trend) + minutes model
+  backtest.py               rolling backtest and ladder report
+  roles.py                  role profiles, style vectors, value gap
+  index.py                  ChromaDB style index
+  service.py                what the agent calls: candidates() and project()
+  build.py                  CLI: data -> backtest -> fit -> saved model
+  synthetic.py              generated history with known answers (tests, offline demo)
 evals/                      golden queries + eval runner
 tests/                      offline tests with fixtures and fake Gemini
 ```

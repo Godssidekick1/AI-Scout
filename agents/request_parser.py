@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from config import settings
 from core import llm
 from core.tracing import traced_node
+from forecast.roles import role_from_text
 from models.llm_schemas import SearchConstraints
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,8 @@ PARSER_SYSTEM_PROMPT = """You are the lead scout at a Premier League club.
 Turn the user's scouting request into search constraints.
 Only fill a field when the request states or clearly implies it; otherwise leave it null or empty.
 "under 25" means max_age 24. Budgets are in millions of euros.
-Supported leagues: premier_league, la_liga, bundesliga, serie_a, ligue_1."""
+Supported leagues: premier_league, la_liga, bundesliga, serie_a, ligue_1.
+Pick the role profile closest to what the request describes; set target_team only if a buying club is named."""
 
 
 @traced_node("request_parser")
@@ -46,6 +48,8 @@ async def parse_request(state: Dict) -> Dict:
         constraints = fallback_parse(request)
 
     c = constraints
+    if c.role is None:
+        c.role = role_from_text(f"{c.position} {request}")
     summary = f"Parsed request: {c.position}"
     if c.tactical_system:
         summary += f" for {c.tactical_system}"

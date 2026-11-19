@@ -79,6 +79,25 @@ class RunContext:
         leagues = await asyncio.gather(*(self.league(lg) for lg in UNDERSTAT_LEAGUES))
         return best_match(name, [p for rows in leagues for p in rows], team)
 
+    async def forecast(self):
+        """The fitted forecast service (python -m forecast.build), or None if not built or disabled."""
+        if not settings.ENABLE_FORECAST:
+            return None
+
+        async def load():
+            from forecast.service import ForecastService
+            return await asyncio.to_thread(ForecastService.load)
+
+        if "forecast" not in self._memo:
+            async def guarded():
+                try:
+                    return await load()
+                except Exception as e:  # noqa: BLE001 - the model is an enhancement; the run goes on without it
+                    self.record_error(f"forecast model unavailable: {e}")
+                    return None
+            self._memo["forecast"] = asyncio.ensure_future(guarded())
+        return await self._memo["forecast"]
+
     async def market_profile(self, name: str) -> Optional[Dict]:
         if not settings.ENABLE_TRANSFERMARKT:
             return None

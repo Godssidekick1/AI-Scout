@@ -13,6 +13,10 @@ from pydantic import BaseModel, Field
 LeagueKey = Literal["premier_league", "la_liga", "bundesliga", "serie_a", "ligue_1"]
 
 
+RoleKey = Literal["poacher", "complete_forward", "inside_forward", "creative_winger", "playmaker",
+                  "box_to_box", "deep_playmaker", "attacking_fullback", "ball_playing_cb"]
+
+
 class SearchConstraints(BaseModel):
     """Structured version of the user's scouting request."""
 
@@ -24,6 +28,10 @@ class SearchConstraints(BaseModel):
     key_attributes: List[str] = Field(default_factory=list, description="Qualities the user emphasises, e.g. 'pressing', 'pace'.")
     target_leagues: List[LeagueKey] = Field(default_factory=list, description="Leagues to search; empty means all five.")
     min_minutes: int = Field(default=600, description="Minimum league minutes this season for a reliable sample.")
+    role: Optional[RoleKey] = Field(default=None, description="Closest role profile to what the user wants, e.g. a "
+                                    "John Stones replacement is ball_playing_cb, a 'fox in the box' is poacher.")
+    target_team: Optional[str] = Field(default=None, description="The club the player would join, if stated "
+                                       "('for Man City'). Null if not stated.")
 
 
 class CharacterAnalysis(BaseModel):

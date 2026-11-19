@@ -55,10 +55,9 @@ def position_family(position: str) -> str:
     return "forward"
 
 
-def position_matches(understat_position: str, requested: str) -> bool:
-    """Does an Understat position string fit the requested role?
+def allowed_codes(requested: str) -> set:
+    """Understat codes that count as the requested role.
     Wingers and attacking midfielders are listed as F or M, so we accept both for them."""
-    codes = set((understat_position or "").split())
     family = position_family(requested)
     allowed = set(POSITION_FAMILIES[family])
     p = (requested or "").lower()
@@ -66,7 +65,12 @@ def position_matches(understat_position: str, requested: str) -> bool:
         allowed |= {"M"}
     if family == "midfielder" and any(w in p for w in ("attacking", "no.10", "number 10", "playmaker")):
         allowed |= {"F"}
-    return bool(codes & allowed)
+    return allowed
+
+
+def position_matches(understat_position: str, requested: str) -> bool:
+    """Does an Understat position string fit the requested role?"""
+    return bool(set((understat_position or "").split()) & allowed_codes(requested))
 
 
 class UnderstatSource(BaseSource):

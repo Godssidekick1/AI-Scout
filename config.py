@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     MIN_VERIFIED_CANDIDATES: int = 5    # verifier sends the finder back below this
     MAX_CANDIDATES: int = 10            # candidates carried into checks and reports
 
+    # === Forecast model (v3) ===
+    ENABLE_FORECAST: bool = True        # use the fitted model + role search when its artifact exists
+    ENABLE_VECTOR_INDEX: bool = True    # ChromaDB style index for role search (numpy fallback)
+
     # === Concurrency ===
     MAX_CONCURRENCY: int = 5            # simultaneous outbound requests per run
 

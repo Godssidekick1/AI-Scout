@@ -108,7 +108,29 @@ async def check(p: ProposedCandidate, c: SearchConstraints) -> Tuple[Optional[Ca
         sources=sources,
         **_ea_fields(ea),
     )
+    await attach_projection(cand, c)
     return cand, ""
+
+
+async def attach_projection(cand: Candidate, c: SearchConstraints) -> None:
+    """Add the forecast model's projection at the target club, when the model is built."""
+    service = await get_context().forecast()
+    if service is None:
+        return
+    row = service.find(cand.name, cand.team)
+    if row is None:
+        return
+    import pandas as pd
+    from agents.player_finder import projection_dict
+    from forecast.roles import ROLES, role_scores
+    proj = await asyncio.to_thread(service.project, row.to_frame().T, c.target_team)
+    r = proj.iloc[0]
+    cand.projection = projection_dict(r)
+    if c.role:
+        ref = service.ps[service.ps["season"] == service.latest_season]
+        cand.role_score = round(float(role_scores(proj, ROLES[c.role], ref)[0]), 2)
+    if "forecast" not in cand.sources:
+        cand.sources.append("forecast")
 
 
 def _ea_fields(ea: Optional[Dict]) -> Dict:

@@ -5,6 +5,8 @@ langchain-google-genai>=4.0
 
 # Data + validation
 numpy>=1.26
+pandas>=2.1
+chromadb>=1.0
 pydantic>=2.6
 pydantic-settings>=2.2
 

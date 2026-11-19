@@ -3,7 +3,7 @@ Player Data Models
 ==================
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -62,3 +62,8 @@ class Candidate(BaseModel):
     adjusted_for_pl: bool = False
     why_recommended: str = ""
     sources: List[str] = Field(default_factory=list)
+
+    # Forecast model (v3): next season's projection at the target club, when the model is built.
+    projection: Dict[str, float] = Field(default_factory=dict)   # pred_/lo_/hi_<metric>, expected_minutes
+    role_score: Optional[float] = None                            # 0 = average player in the role
+    value_gap: Optional[float] = None                             # 0.5 = output suggests worth 50% more than price

@@ -68,6 +68,14 @@ def print_report_text(result: dict, top_n: int = 5) -> None:
         print(f"  {ks.get('minutes_played', 0):.0f} min, {ks.get('goals', 0):.0f} G, {ks.get('assists', 0):.0f} A | "
               f"npxG/90 {ks.get('npxG_p90', 0):.2f}  xA/90 {ks.get('xA_p90', 0):.2f}  "
               f"xGChain/90 {ks.get('xGChain_p90', 0):.2f}  (PL-adjusted)")
+        pj = r.get("projection") or {}
+        if pj:
+            gap = r.get("value_gap")
+            gap_txt = f" | value gap {gap:+.0%}" if gap is not None else ""
+            print(f"  Next season (model): npxG/90 {pj.get('pred_npxG', 0):.2f} [{pj.get('lo_npxG', 0):.2f}-{pj.get('hi_npxG', 0):.2f}]"
+                  f"  xA/90 {pj.get('pred_xA', 0):.2f} [{pj.get('lo_xA', 0):.2f}-{pj.get('hi_xA', 0):.2f}]"
+                  f"  xGBuildup/90 {pj.get('pred_xGBuildup', 0):.2f}  ~{pj.get('expected_minutes', 0):.0f} min"
+                  f" | role score {r.get('role_score')}{gap_txt}")
         for label, key in (("Strengths", "strengths"), ("Weaknesses", "weaknesses"), ("Risks", "risk_factors")):
             if r.get(key):
                 print(f"  {label}: " + "; ".join(r[key]))
