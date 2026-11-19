@@ -89,6 +89,7 @@ y_hat = theta * (1 + lambda[league change, m, position group]   league tax
 python -m forecast.build              # download data, backtest, fit, save (needs access to understat.com,
                                       # api.clubelo.com and the Transfermarkt dataset host)
 python -m forecast.build --synthetic  # same pipeline on generated data, offline
+python -m forecast.build --check      # check that understat.com, the Transfermarkt dataset and ClubElo are reachable
 ```
 
 The agent loads the saved model automatically. Without it, the pipeline runs exactly as before.

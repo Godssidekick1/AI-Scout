@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import time
 from typing import Dict, Iterable, Optional
 
 import httpx
@@ -54,16 +55,36 @@ def parse_snapshot(text: str) -> Dict[str, Dict]:
     return out
 
 
-def fetch_snapshot(date: str, cache_dir: Optional[str] = None) -> Dict[str, Dict]:
-    """One dated snapshot, cached on disk (past dates never change)."""
+class ClubEloUnavailable(RuntimeError):
+    """api.clubelo.com could not be reached or kept returning errors."""
+
+
+def fetch_snapshot(date: str, cache_dir: Optional[str] = None, retries: int = 3) -> Dict[str, Dict]:
+    """One dated snapshot, cached on disk (past dates never change).
+    Retries transport errors and 5xx with backoff; raises ClubEloUnavailable if they persist."""
     path = settings.cache_path / "clubelo" / f"{date}.csv"
     if path.exists():
         return parse_snapshot(path.read_text())
-    resp = httpx.get(f"{API}/{date}", timeout=settings.HTTP_TIMEOUT_S, follow_redirects=True)
-    resp.raise_for_status()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(resp.text)
-    return parse_snapshot(resp.text)
+    reason = ""
+    for attempt in range(retries + 1):
+        try:
+            resp = httpx.get(f"{API}/{date}", timeout=settings.HTTP_TIMEOUT_S, follow_redirects=True)
+            if resp.status_code < 400:
+                snapshot = parse_snapshot(resp.text)
+                if snapshot:   # only cache a real CSV, never an error page
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(resp.text)
+                    return snapshot
+                reason = "response had no rated clubs"
+            elif resp.status_code < 500 and resp.status_code != 429:
+                raise ClubEloUnavailable(f"{API}/{date} -> HTTP {resp.status_code}")
+            else:
+                reason = f"HTTP {resp.status_code}"
+        except httpx.HTTPError as e:
+            reason = f"{type(e).__name__}: {e}"
+        if attempt < retries:
+            time.sleep(1.0 * 2 ** attempt)
+    raise ClubEloUnavailable(f"{API}/{date} failed after {retries + 1} attempts ({reason})")
 
 
 def match_team(team: str, league: str, snapshot: Dict[str, Dict], min_score: int = 80) -> Optional[str]:

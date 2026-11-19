@@ -3,6 +3,7 @@ Build the forecast model
 ========================
     python -m forecast.build              # real data (needs network access to the sources)
     python -m forecast.build --synthetic  # offline demo on generated data
+    python -m forecast.build --check      # can this machine reach the three sources?
 
 Steps: load history -> link Understat to Transfermarkt -> ClubElo ratings ->
 player-season table and season pairs -> rolling backtest (ladder) -> final fit
@@ -19,6 +20,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import httpx
 import numpy as np
 import pandas as pd
 
@@ -46,7 +48,11 @@ def load_real(seasons: List[int]) -> Tuple[pd.DataFrame, Dict[str, float]]:
     players, valuations = transfermarkt.load("players"), transfermarkt.load("player_valuations")
     us_to_tm = transfermarkt.match_players(us, players, valuations)
 
-    snapshots = {s: clubelo.fetch_snapshot(clubelo.season_start(s)) for s in seasons}
+    try:
+        snapshots = {s: clubelo.fetch_snapshot(clubelo.season_start(s)) for s in seasons}
+    except clubelo.ClubEloUnavailable as e:
+        raise SystemExit(f"ClubElo ratings unavailable: {e}. The API is sometimes down; "
+                         "rerun later (Understat and Transfermarkt downloads stay cached).")
     teams = set(zip(us["team"], us["league"], us["season"]))
     team_elo = clubelo.team_elo_table(teams, snapshots)
 
@@ -54,6 +60,38 @@ def load_real(seasons: List[int]) -> Tuple[pd.DataFrame, Dict[str, float]]:
     latest_values = transfermarkt.value_at(valuations, dt.date.today().isoformat())
     values = {u: latest_values.get(t) for u, t in us_to_tm.items() if t is not None and t in latest_values}
     return ps, values
+
+
+def check_sources() -> bool:
+    """One request to each source; prints what works. Returns True if all three do."""
+    from data_sources.understat_source import UnderstatSource
+    from forecast.data import clubelo, transfermarkt
+
+    def understat() -> str:
+        r = httpx.get(f"{UnderstatSource.BASE_URL}/league/EPL", timeout=20, follow_redirects=True)
+        if UnderstatSource.is_maintenance_page(r.text):
+            return "DOWN (site is showing its maintenance page)"
+        return "ok" if r.status_code == 200 else f"DOWN (HTTP {r.status_code})"
+
+    def tm() -> str:
+        r = httpx.head(f"{transfermarkt.BASE_URL}/players.csv.gz", timeout=20, follow_redirects=True)
+        return "ok" if r.status_code == 200 else f"DOWN (HTTP {r.status_code})"
+
+    def elo() -> str:
+        r = httpx.get(f"{clubelo.API}/{clubelo.season_start(current_understat_season() - 1)}", timeout=20)
+        if r.status_code != 200:
+            return f"DOWN (HTTP {r.status_code})"
+        return "ok" if clubelo.parse_snapshot(r.text) else "DOWN (no ratings in response)"
+
+    all_ok = True
+    for name, probe in (("understat.com", understat), ("Transfermarkt dataset", tm), ("api.clubelo.com", elo)):
+        try:
+            status = probe()
+        except httpx.HTTPError as e:
+            status = f"UNREACHABLE ({type(e).__name__})"
+        all_ok &= status == "ok"
+        print(f"{name:24s} {status}")
+    return all_ok
 
 
 def load_synthetic(seed: int = 7) -> Tuple[pd.DataFrame, Dict[str, float]]:
@@ -87,11 +125,15 @@ def report(res: Dict[str, pd.DataFrame], model: ProjectionModel, synthetic: bool
 def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--synthetic", action="store_true", help="use generated data (offline demo)")
+    ap.add_argument("--check", action="store_true", help="only check that the data sources are reachable")
     ap.add_argument("--first-season", type=int, default=2014)
     ap.add_argument("--test-seasons", type=int, default=4, help="how many recent completed seasons to test on")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(message)s")
+
+    if args.check:
+        raise SystemExit(0 if check_sources() else 1)
 
     current = current_understat_season()
     if args.synthetic:

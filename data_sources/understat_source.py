@@ -125,7 +125,15 @@ class UnderstatSource(BaseSource):
         resp = await http_request("GET", f"{self.BASE_URL}/league/{slug}/{self.season}", headers=self.headers)
         if resp is None:
             return []
+        if self.is_maintenance_page(resp.text):
+            logger.warning("Understat is showing its maintenance page ('We will come back soon'); try again later")
+            return []
         return self.parse_embedded_html(resp.text)
+
+    @staticmethod
+    def is_maintenance_page(html: str) -> bool:
+        """Understat answers every URL with HTTP 200 and this page while it is down."""
+        return "come back soon" in (html or "").lower() and "playersData" not in (html or "")
 
     @staticmethod
     def parse_league_payload(data) -> List[Dict]:

@@ -250,3 +250,26 @@ def test_verifier_attaches_projection_and_reports_compute_value_gap(service, mon
              for i, (s, v) in enumerate([(1.5, 10), (1.0, 30), (0.0, 20), (-0.5, 5)])]
     gaps = report_writer.value_gaps(cands, {})
     assert gaps["0"] > gaps["1"]
+
+
+def test_clubelo_retries_then_raises_on_server_errors(monkeypatch, tmp_path):
+    import httpx
+    monkeypatch.setattr(type(settings), "cache_path", property(lambda self: tmp_path))
+    monkeypatch.setattr(clubelo.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        return httpx.Response(502, text="")
+
+    monkeypatch.setattr(clubelo.httpx, "get", fake_get)
+    with pytest.raises(clubelo.ClubEloUnavailable):
+        clubelo.fetch_snapshot("2024-08-01", retries=2)
+    assert len(calls) == 3
+    assert not (tmp_path / "clubelo" / "2024-08-01.csv").exists()   # error pages are never cached
+
+
+def test_understat_maintenance_page_detected():
+    from data_sources.understat_source import UnderstatSource
+    assert UnderstatSource.is_maintenance_page("<html><body><h1>We will come back soon</h1></body></html>")
+    assert not UnderstatSource.is_maintenance_page("<script>var playersData = JSON.parse('[]')</script>")
