@@ -487,3 +487,28 @@ def test_winger_brief_returns_only_wingers_beating_the_bar_and_not_the_clubs_own
     df2, _, _ = brief.search(strict, service, n=10)
     assert set(df2["tm_sub_position"]) <= {"Left Winger", "Left Midfield"}
     assert df2["age"].between(20, 30).all()
+
+
+def test_broken_install_is_reported_once_not_retried(service, monkeypatch):
+    import asyncio
+    from core import llm
+    from forecast import brief
+    calls = {"n": 0}
+
+    async def bad():
+        calls["n"] += 1
+        raise AttributeError("module 'aiohttp' has no attribute 'ClientConnectorDNSError'")
+    with pytest.raises(llm.LLMError, match="environment problem"):
+        asyncio.run(llm.with_retries(bad, "x", attempts=3))
+    assert calls["n"] == 1
+
+    monkeypatch.setattr(settings, "GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr(brief, "_GEMINI_BROKEN", "")
+
+    async def structured(*a, **k):
+        return await llm.with_retries(bad, "forecast.brief")
+    monkeypatch.setattr(llm, "structured", structured)
+    assert "pip install" in brief.understand("striker under 25", service).parser
+    n = calls["n"]
+    assert brief.understand("winger under 23", service).parser.startswith("rules (Gemini unavailable")
+    assert calls["n"] == n                      # not tried again

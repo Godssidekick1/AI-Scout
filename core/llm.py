@@ -80,7 +80,11 @@ async def with_retries(fn: Callable[[], Awaitable[R]], what: str,
     for i in range(1, attempts + 1):
         try:
             return await asyncio.wait_for(fn(), timeout=settings.LLM_TIMEOUT_S), i
-        except Exception as e:  # noqa: BLE001 - every failure is retryable here
+        except (AttributeError, ImportError, TypeError, NameError) as e:
+            # a broken or outdated install, or a code bug: retrying cannot help
+            raise LLMError(f"{what} cannot run ({type(e).__name__}: {e}). This is an environment problem, "
+                           "not a network one: try  pip install -U -r requirements.txt") from e
+        except Exception as e:  # noqa: BLE001 - network, quota, timeouts: worth retrying
             last = e
             if i == attempts:
                 break
