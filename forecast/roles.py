@@ -64,7 +64,8 @@ ROLE_CUES: List[Tuple[str, Tuple[str, ...]]] = [
     ("box_to_box", ("box-to-box", "central midfielder", "cm", "number 8", "no.8")),
     ("playmaker", ("playmaker", "number 10", "no.10", "attacking midfielder")),
     ("creative_winger", ("creative winger", "winger", "wide")),
-    ("inside_forward", ("inside forward", "inverted winger", "inverted")),
+    ("inside_forward", ("inside forward", "inverted winger", "inverted", "goalscoring winger", "goal-scoring winger",
+                        "scoring winger", "goalscoring wide", "wide forward", "winger who scores", "winger who can score")),
     ("poacher", ("poacher", "fox in the box", "goalscorer")),
     ("complete_forward", ("striker", "centre-forward", "center-forward", "number 9", "no.9", "forward")),
 ]

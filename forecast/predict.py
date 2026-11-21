@@ -170,6 +170,13 @@ LEAGUE_SHORT = {"premier_league": "EPL", "la_liga": "LaLiga", "bundesliga": "Bun
 UNMEASURED_WORDS = {"tackl": "tackling", "intercept": "interceptions", "aerial": "aerials", "header": "heading",
                     "defensive": "defending", "defending": "defending", "duel": "duels", "pace": "pace",
                     "fast": "pace", "quick": "pace", "physical": "physicality", "tall": "height", "in the air": "aerials",
+                    "track back": "tracking back", "tracks back": "tracking back", "tracking back": "tracking back",
+                    "work rate": "work rate", "hard-working": "work rate", "hard working": "work rate",
+                    "adaptab": "tactical versatility", "versatil": "tactical versatility",
+                    "any formation": "tactical versatility", "formations": "tactical versatility",
+                    "any system": "tactical versatility", "multiple positions": "tactical versatility",
+                    "two-footed": "weaker foot", "leader": "leadership", "mentality": "mentality",
+                    "attitude": "attitude (the agent's news check covers this)",
                     "pressing": "pressing", "work rate": "work rate", "saves": "shot-stopping",
                     "shot-stopp": "shot-stopping", "keeper": "goalkeeping"}
 
@@ -189,6 +196,7 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
     if b.unmeasured:
         words = sorted({UNMEASURED_WORDS.get(u, u) for u in b.unmeasured})
         print(f"Not in the free data, so not used: {', '.join(words)} (needs event data)")
+    print("Searching...", flush=True)
     try:
         df, him, prof = briefs.search(b, service, n=n, exclude=exclude)
     except ValueError as e:
@@ -197,13 +205,18 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
     print("Ranking on: " + ", ".join(f"{m} {w:.0%}" for m, w in sorted(prof.weights.items(), key=lambda x: -x[1]))
           + (f"  ({prof.note})" if prof.note else ""))
     if df.empty:
-        print("\nNo players pass these filters. Loosen the age, value, league or minutes limits.")
+        extra = " Goal/assist targets are strict: 15 npxG in a season is elite." if (b.min_goals or b.min_assists) else ""
+        print("\nNo players pass these filters. Loosen the age, value, league or minutes limits." + extra)
         return
 
+    if b.note:
+        print("\n" + b.note)
     shown = [m for m, _ in sorted(prof.weights.items(), key=lambda x: -x[1])][:3]
+    extra = [c for c in ("proj_goals", "proj_assists") if c in df and getattr(b, "min_" + c[5:]) is not None]
     score_col = "vs him" if him is not None else "score"
     head = (f"{'#':>3}  {'player':<23}{'club':<19}{'lg':<7}{'age':>4}{'min':>6}{'style':>6}{score_col:>7}"
-            f"{'gap':>6}{'EUR M':>7}" + "".join(f"{m[:9]:>10}" for m in shown))
+            f"{'gap':>6}{'EUR M':>7}" + "".join(f"{m[:9]:>10}" for m in shown)
+            + "".join(f"{c[5:]:>8}" for c in extra))
     print("\n" + head)
     print("-" * len(head))
 
@@ -214,7 +227,8 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
         sty = f"{r['style_similarity']:.0f}" if pd.notna(r.get("style_similarity", np.nan)) else ""
         return (f"{i:>3}  {str(r['name'])[:22]:<23}{str(r['team'])[:18]:<19}{LEAGUE_SHORT.get(r['league'], r['league'])[:6]:<7}"
                 f"{age:>4}{r['minutes']:>6.0f}{sty:>6}{score:>7}{gap:>6}{val:>7}"
-                + "".join(f"{r[f'pred_{m}']:>10.2f}" for m in shown))
+                + "".join(f"{r[f'pred_{m}']:>10.2f}" for m in shown)
+                + "".join(f"{r[c]:>8.1f}" if c in r and pd.notna(r[c]) else f"{'':>8}" for c in extra))
 
     if him is not None:
         print(line("him", him, "0.00"))
@@ -258,7 +272,13 @@ def interactive(service: ForecastService) -> None:
         if not replace and not text:
             return
         print()
-        run_brief(service, text, replace=replace)
+        try:
+            run_brief(service, text, replace=replace)
+        except KeyboardInterrupt:
+            print("\n(stopped)")
+        except Exception:  # noqa: BLE001 - keep the prompt alive, show what broke
+            import traceback
+            traceback.print_exc()
         print("\n" + "=" * 60 + "\n")
 
 
@@ -283,6 +303,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m forecast.predict", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", help="path to a saved model (default: the one forecast.build wrote)")
+    ap.add_argument("--chroma", action="store_true",
+                    help="retrieve with the ChromaDB index (default here: in-memory numpy, same results)")
     sub = ap.add_subparsers(dest="cmd")
 
     f = sub.add_parser("find", help="shortlist from a player to replace and/or a description")
@@ -320,6 +342,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     c.add_argument("--league", choices=LEAGUES)
 
     args = ap.parse_args(argv)
+    try:
+        import faulthandler
+        faulthandler.enable()                         # a native crash prints where it happened
+    except Exception:  # noqa: BLE001 - no real stderr (e.g. under pytest)
+        pass
+    from config import settings
+    settings.ENABLE_VECTOR_INDEX = bool(args.chroma)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")      # accented names on a Windows console
     service = load(args.model)

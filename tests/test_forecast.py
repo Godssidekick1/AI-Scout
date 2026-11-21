@@ -412,3 +412,21 @@ def test_predict_find_and_interactive(service, tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: next(answers, ""))
     predict.main(["--model", str(path)])
     assert "value <= EUR 40M" in capsys.readouterr().out
+
+
+def test_brief_reads_age_ranges_goal_targets_and_flags_soft_asks(service, monkeypatch):
+    from forecast import brief
+    monkeypatch.setattr(settings, "ENABLE_VECTOR_INDEX", False)
+    p = _named(service, "AM")
+    b = brief.parse("a goalscoring winger, who can track back, between 25-30, pacey and who can score 15+ goals "
+                    "in a season for my team", service, replace=p["name"])
+    assert (b.role, b.min_age, b.max_age, b.min_goals) == ("inside_forward", 25, 30, 15)
+    assert {"track back", "pace"} <= set(b.unmeasured)
+    b2 = brief.parse("a cb good on the ball and reliable defensively, adaptable, can play any formation", service)
+    assert b2.min_minutes == 1800 and {"adaptab", "any formation", "defensive"} <= set(b2.unmeasured)
+    assert brief.parse("striker, 15-20 goals a season", service).min_age is None     # goals, not ages
+
+    # an unreachable target shows the closest players instead of nothing
+    b.min_goals, b.min_age, b.max_age = 99, None, None
+    df, him, _ = brief.search(b, service, n=5)
+    assert len(df) == 5 and b.note and df["proj_goals"].is_monotonic_decreasing and "proj_goals" in him

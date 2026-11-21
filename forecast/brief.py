@@ -49,7 +49,10 @@ EMPHASIS: List[Tuple[str, Tuple[str, ...], Dict[str, float]]] = [
     ("shooting volume", ("shooter", "shots", "shoots"), {"shots": 2.0}),
     ("involvement", ("involved", "link-up", "link up", "combination", "combines"), {"xGChain": 2.0}),
 ]
-UNMEASURED = ("tackl", "intercept", "aerial", "header", "defensive", "defending", "duel", "pace", "fast",
+UNMEASURED = ("track back", "tracks back", "tracking back", "work rate", "hard-working", "hard working", "adaptab",
+              "versatil", "any formation", "formations", "any system", "multiple positions", "two-footed", "leader",
+              "mentality", "attitude", "tackl", "intercept", "aerial", "header", "defensive", "defending", "duel",
+              "pace", "fast",
               "quick", "physical", "tall", "in the air", "pressing", "work rate", "saves", "shot-stopp", "keeper")
 HIDDEN = ("hidden", "unknown", "under the radar", "under-the-radar", "bargain", "undervalued", "underrated",
           "cheap", "value for money", "gem", "unexpected")
@@ -82,7 +85,10 @@ class Brief:
     max_value_eur: Optional[float] = None
     leagues: Optional[List[str]] = None
     min_minutes: int = 900
-    sort: str = "fit"                          # "fit" (projected output in the profile) or "value" (value gap)
+    min_goals: Optional[float] = None         # projected non-penalty xG over expected minutes
+    min_assists: Optional[float] = None       # projected xA over expected minutes
+    sort: str = "fit"
+    note: str = ""                          # "fit" (projected output in the profile) or "value" (value gap)
     unmeasured: List[str] = field(default_factory=list)
 
     def describe(self) -> List[str]:
@@ -108,6 +114,10 @@ class Brief:
         if self.leagues:
             out.append("leagues: " + ", ".join(self.leagues))
         out.append(f"min {self.min_minutes} minutes last season")
+        if self.min_goals is not None:
+            out.append(f"projected {self.min_goals:g}+ goals next season (npxG over his expected minutes)")
+        if self.min_assists is not None:
+            out.append(f"projected {self.min_assists:g}+ assists next season (xA over his expected minutes)")
         out.append("sorted by value gap (hidden talent)" if self.sort == "value" else "sorted by projected output")
         return out
 
@@ -171,7 +181,8 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     t_age = MONEY.sub(" ", t)
 
     # age
-    if m := re.search(r"\bage[sd]?\s*(\d{2})\s*(?:-|to)\s*(\d{2})\b", t_age):
+    if (m := re.search(r"\b(?:aged?\s*|between\s*|from\s*)?(\d{2})\s*(?:-|\u2013|to|and)\s*(\d{2})\b(?!\s*\+?\s*(?:goals|assists|min))",
+                       t_age)) and 15 <= int(m.group(1)) < int(m.group(2)) <= 40:
         b.min_age, b.max_age = float(m.group(1)), float(m.group(2))
     elif m := re.search(r"\b(?:under|below|younger than|less than|max(?:imum)? age|aged? under|u-?|<)\s*(\d{2})s?\b", t_age):
         b.max_age = float(m.group(1)) - (1 if not re.search(r"\bu-?\d{2}", m.group(0)) else 0)
@@ -198,10 +209,16 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
         b.leagues = [lg for lg in LEAGUES if lg not in excluded]
 
     # minutes
-    if re.search(r"\b(regular|starter|nailed|proven|ever-present)\b", t):
+    if re.search(r"\b(regular|starter|nailed|proven|ever-present|reliable|reliability|consistent|durable|available)", t):
         b.min_minutes = 1800
     elif re.search(r"\b(rotation|squad player|backup|bench)\b", t):
         b.min_minutes = 450
+
+    # output targets: "15+ goals", "10 assists a season" -> projected npxG / xA over his expected minutes
+    if m := re.search(r"\b(\d{1,2})\s*\+?\s*(?:or more\s+)?(?:league\s+)?goals\b", t):
+        b.min_goals = float(m.group(1))
+    if m := re.search(r"\b(\d{1,2})\s*\+?\s*(?:or more\s+)?(?:league\s+)?assists\b", t):
+        b.min_assists = float(m.group(1))
 
     # role, emphasis, unmeasured asks, sort
     b.role = role_from_text(re.sub(r"forward (?:pass|run|carr)\w*", " ", t))
@@ -255,7 +272,9 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
     """Ranked shortlist for a brief, plus the replaced player's own projection (as a yardstick)."""
     from forecast.roles import role_scores
     prof, target = profile(b, service)
-    df = service.candidates(prof, n=max(n, 25) if b.sort == "value" else n, to_team=b.to_team, max_age=b.max_age,
+    thresholds = b.min_goals is not None or b.min_assists is not None
+    pool_n = max(n * 6, 120) if thresholds else (max(n, 25) if b.sort == "value" else n)
+    df = service.candidates(prof, n=pool_n, to_team=b.to_team, max_age=b.max_age,
                             min_age=b.min_age, max_value_eur=b.max_value_eur, min_minutes=b.min_minutes,
                             leagues=b.leagues, exclude=exclude,
                             exclude_ids=[b.replace["us_id"]] if b.replace is not None else (), target=target)
@@ -264,6 +283,22 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
         him = service.project(b.replace.to_frame().T.infer_objects(), b.to_team).iloc[0].copy()
         him["role_score"] = round(float(role_scores(him.to_frame().T.infer_objects(), prof,
                                                     service.in_latest_season(service.ps))[0]), 2)
+        him["proj_goals"] = round(float(him["pred_npxG"] * him["expected_minutes"] / 90), 1)
+        him["proj_assists"] = round(float(him["pred_xA"] * him["expected_minutes"] / 90), 1)
+    if not df.empty and thresholds:
+        season = df["expected_minutes"] / 90
+        keep = np.ones(len(df), bool)
+        if b.min_goals is not None:
+            keep &= (df["pred_npxG"] * season >= b.min_goals).to_numpy()
+        if b.min_assists is not None:
+            keep &= (df["pred_xA"] * season >= b.min_assists).to_numpy()
+        df = df.assign(proj_goals=(df["pred_npxG"] * season).round(1), proj_assists=(df["pred_xA"] * season).round(1))
+        if keep.any():
+            df = df[keep].reset_index(drop=True)
+        else:   # nobody reaches the target: show the closest instead of an empty list
+            b.note = "Nobody is projected to reach that target; showing the closest."
+            df = df.sort_values("proj_goals" if b.min_goals is not None else "proj_assists",
+                                ascending=False).reset_index(drop=True)
     if not df.empty and b.sort == "value":
-        df = df.sort_values("value_gap", ascending=False, na_position="last").head(n).reset_index(drop=True)
-    return df, him, prof
+        df = df.sort_values("value_gap", ascending=False, na_position="last")
+    return df.head(n).reset_index(drop=True), him, prof
