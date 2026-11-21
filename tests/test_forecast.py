@@ -345,3 +345,14 @@ def test_predict_cli_player_and_role(service, tmp_path, capsys, monkeypatch):
 
     predict.main(["--model", str(path), "role", "a Stones replacement", "-n", "3"])
     assert "Ball-playing centre-back" in capsys.readouterr().out
+
+
+def test_a_league_missing_its_latest_season_stays_searchable(service, monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_VECTOR_INDEX", False)
+    ps = service.ps
+    gappy = ForecastService(ps=ps[~((ps["league"] == "bundesliga") & (ps["season"] == ps["season"].max()))],
+                            model=service.model, minutes=service.minutes, values=service.values, synthetic=True)
+    club = gappy.ps[gappy.ps["league"] == "bundesliga"]["team"].iloc[-1]
+    assert gappy._team_row(club) is not None
+    df = gappy.candidates("poacher", n=200, min_minutes=0, leagues=["bundesliga"])
+    assert not df.empty

@@ -64,6 +64,12 @@ class ForecastService:
     def latest_season(self) -> int:
         return int(self.ps["season"].max())
 
+    def in_latest_season(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Rows from each league's most recent season in the data. Usually one season for all,
+        but a league whose latest season failed to load would otherwise drop out entirely."""
+        latest = self.ps.groupby("league")["season"].max()
+        return df[df["season"] == df["league"].map(latest)]
+
     def current(self) -> pd.DataFrame:
         """Each player's most recent season in the table."""
         return self.ps.sort_values("season").groupby("us_id").tail(1)
@@ -76,8 +82,7 @@ class ForecastService:
         return cur[cur["us_id"] == hit["us_id"]].iloc[0] if hit else None
 
     def _team_row(self, team: str) -> Optional[pd.Series]:
-        tt = team_totals(self.ps).reset_index()
-        tt = tt[tt["season"] == self.latest_season]
+        tt = self.in_latest_season(team_totals(self.ps).reset_index())
         from thefuzz import fuzz
         best, score = None, 0
         for i, r in tt.iterrows():
@@ -106,7 +111,7 @@ class ForecastService:
 
     # ── retrieval ─────────────────────────────────────────────
     def _style_vectors(self, rows: pd.DataFrame) -> np.ndarray:
-        scales = metric_scales(self.ps[self.ps["season"] == self.latest_season])
+        scales = metric_scales(self.in_latest_season(self.ps))
         return np.vstack([style_vector({m: r[f"{m}_p90"] for m in METRICS}, scales) for _, r in rows.iterrows()])
 
     def _retrieve(self, cur: pd.DataFrame, role: RoleProfile, k: int) -> pd.DataFrame:
@@ -117,7 +122,7 @@ class ForecastService:
             try:
                 from forecast.index import StyleIndex
                 everyone = self.current()
-                everyone = everyone[everyone["season"] == self.latest_season]
+                everyone = self.in_latest_season(everyone)
                 index = StyleIndex(settings.cache_path / "chroma", self.latest_season)
                 index.sync(everyone, self._style_vectors(everyone))
                 hits = index.query(tv, n=len(everyone), groups=role.groups)
@@ -155,7 +160,8 @@ class ForecastService:
         Adds `value_gap`: how cheap the player looks for his projected output."""
         role: RoleProfile = ROLES[role_key]
         cur = self.current()
-        cur = cur[(cur["season"] == self.latest_season) & cur["group"].isin(role.groups) & (cur["minutes"] >= min_minutes)]
+        cur = self.in_latest_season(cur)
+        cur = cur[cur["group"].isin(role.groups) & (cur["minutes"] >= min_minutes)]
         if leagues:
             cur = cur[cur["league"].isin(list(leagues))]
         if max_age is not None:
@@ -173,7 +179,7 @@ class ForecastService:
             return pd.DataFrame()
 
         proj = self.project(pool.drop(columns=["style_similarity"]), to_team)
-        reference = self.ps[self.ps["season"] == self.latest_season]
+        reference = self.in_latest_season(self.ps)
         proj["role_score"] = np.round(role_scores(proj, role, reference), 2)
         proj["style_similarity"] = pool["style_similarity"].to_numpy()
         proj["value_gap"] = np.round(value_gap(proj["role_score"].to_numpy(float),

@@ -64,14 +64,13 @@ def resolve_club(service: ForecastService, club: Optional[str]) -> Optional[pd.S
         from thefuzz import process
         teams = clubs_table(service)["team"].tolist()
         close = [t for t, _ in process.extract(club, teams, limit=5)]
-        sys.exit(f"No club matching '{club}' in {season_label(service.latest_season)}. Closest: {', '.join(close)}\n"
+        sys.exit(f"No club matching '{club}' in the latest season. Closest: {', '.join(close)}\n"
                  "See every club with:  python -m forecast.predict clubs")
     return row
 
 
 def clubs_table(service: ForecastService) -> pd.DataFrame:
-    tt = team_totals(service.ps).reset_index()
-    return tt[tt["season"] == service.latest_season].sort_values("elo", ascending=False)
+    return service.in_latest_season(team_totals(service.ps).reset_index()).sort_values("elo", ascending=False)
 
 
 # ── commands ───────────────────────────────────────────────────
@@ -175,9 +174,9 @@ def cmd_clubs(service: ForecastService, args) -> None:
     tt = clubs_table(service)
     if args.league:
         tt = tt[tt["league"] == args.league]
-    print(f"Clubs in {season_label(service.latest_season)}, strongest first (Elo at season start)\n")
+    print("Clubs in each league's latest season, strongest first (Elo at season start)\n")
     for _, r in tt.iterrows():
-        print(f"{r['elo']:>7.0f}  {r['team']:<28}{league(r['league'])}")
+        print(f"{r['elo']:>7.0f}  {r['team']:<28}{league(r['league'])} {season_label(int(r['season']))}")
 
 
 def main(argv: Optional[List[str]] = None) -> None:

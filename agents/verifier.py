@@ -127,7 +127,7 @@ async def attach_projection(cand: Candidate, c: SearchConstraints) -> None:
     r = proj.iloc[0]
     cand.projection = projection_dict(r)
     if c.role:
-        ref = service.ps[service.ps["season"] == service.latest_season]
+        ref = service.in_latest_season(service.ps)
         cand.role_score = round(float(role_scores(proj, ROLES[c.role], ref)[0]), 2)
     if "forecast" not in cand.sources:
         cand.sources.append("forecast")
