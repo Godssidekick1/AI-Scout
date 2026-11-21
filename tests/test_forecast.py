@@ -319,3 +319,29 @@ def test_transfermarkt_matcher_rejects_one_word_subset_without_club():
     m = PlayerMatcher(players, vals)
     assert m.match("Alex Berenguer", "Athletic Club", 2025) is None      # 'Alex' alone is not him
     assert m.match("Kepa", "Arsenal", 2025) == 2                          # known-as name, club agrees
+
+
+def test_predict_cli_player_and_role(service, tmp_path, capsys, monkeypatch):
+    from forecast import predict
+    monkeypatch.setattr(settings, "ENABLE_VECTOR_INDEX", False)
+    path = service.save(tmp_path / "svc.pkl")
+    cur = service.current()
+    name = cur[cur["season"] == service.latest_season].iloc[0]["name"]
+    club = cur[(cur["season"] == service.latest_season) & (cur["name"] != name)].iloc[0]["team"]
+
+    predict.main(["--model", str(path), "player", name, "--to", club, "--age", "31", "--minutes", "1800"])
+    out = capsys.readouterr().out
+    assert f"moves to {club}" in out and "1800 (your input)" in out and "npxG" in out
+
+    # the breakdown adds up: next = ability * (1 + terms)
+    row = cur[cur["name"] == name]
+    proj = service.project(row, club, age=31, minutes=1800).iloc[0]
+    rows = service._pair_rows(row, club).assign(age=31.0)
+    hist = predict.history_features(service.ps, rows)
+    for m in METRICS:
+        rows[f"trend_{m}"] = hist[f"trend_{m}"].to_numpy()
+    c = service.model.contributions(rows, hist)["npxG"].iloc[0]
+    assert abs(max(c["ability"] * (1 + c.drop("ability").sum()), 0) - proj["pred_npxG"]) < 1e-9
+
+    predict.main(["--model", str(path), "role", "a Stones replacement", "-n", "3"])
+    assert "Ball-playing centre-back" in capsys.readouterr().out

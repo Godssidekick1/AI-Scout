@@ -96,6 +96,19 @@ python -m forecast.build --elo results  # team strength from football-data.co.uk
 
 The agent loads the saved model automatically. Without it, the pipeline runs exactly as before.
 
+**Try it yourself** with your own inputs, straight from the saved model (no API keys):
+
+```bash
+python -m forecast.predict player "Bukayo Saka"                       # next season if he stays
+python -m forecast.predict player "Bukayo Saka" --to "Real Madrid"    # ...if he moves
+python -m forecast.predict player "Ollie Watkins" --age 33 --minutes 1500   # what-if age and minutes
+python -m forecast.predict role "a Stones replacement" --to "Manchester City" --max-age 24 --max-value 30
+python -m forecast.predict roles      # role profiles
+python -m forecast.predict clubs      # clubs you can move a player to, strongest first
+```
+
+`player` prints last season, his estimated ability, next season's projection with an 80% range, and how much each term (league tax, team strength, usage, age, trend) moves it. `role` ranks players for a role with their value gap; `--exclude` drops the obvious names.
+
 Data: Understat (xG family), [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets) (CC0: ages, positions, values, transfers), ClubElo (team strength). Design rationale and the research behind each term are in the project's design doc.
 
 ## Reliability, cost and observability
@@ -205,6 +218,7 @@ forecast/
   index.py                  ChromaDB style index
   service.py                what the agent calls: candidates() and project()
   build.py                  CLI: data -> backtest -> fit -> saved model
+  predict.py                CLI: try the saved model (project a player, rank a role)
   synthetic.py              generated history with known answers (tests, offline demo)
 evals/                      golden queries + eval runner
 tests/                      offline tests with fixtures and fake Gemini

@@ -37,7 +37,9 @@ DECAY = 0.6                        # weight of a season relative to the one afte
 K_GRID = (150, 300, 600, 900, 1350, 2000, 3000, 4500)   # shrinkage strength, in minutes
 Z80 = 1.2816                       # half-width of an 80% normal interval, in standard deviations
 AGE_RANGE = (17, 37)
-THETA_FLOOR = 0.25                 # relative terms use max(theta, 25% of the group mean) as the base
+THETA_FLOOR = 0.25
+TERM_OF = {"league": "league", "team_elo_per_100": "team", "usage_share_change": "usage",
+           "age_curve": "age", "personal_trend": "trend", "intercept": "drift"}                 # relative terms use max(theta, 25% of the group mean) as the base
 
 
 # ── history features (computed once per pair, reused for every k) ──────────
@@ -144,6 +146,21 @@ class ProjectionModel:
             out[f"pred_{m}"] = yhat
             out[f"lo_{m}"] = np.maximum(yhat - Z80 * sd, 0.0)
             out[f"hi_{m}"] = yhat + Z80 * sd
+        return out
+
+    def contributions(self, pairs: pd.DataFrame, hist: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        """Per metric: ability (theta) and each term's relative effect for every row, so a
+        projection can be read as theta * (1 + league + team + usage + age + trend + drift)."""
+        out: Dict[str, pd.DataFrame] = {}
+        for m, fit in self.fits.items():
+            mu = pairs["group"].map(fit.prior).fillna(np.mean(list(fit.prior.values()))).to_numpy(float)
+            df = pd.DataFrame({"ability": self._theta(hist, m, mu, fit.k)}, index=pairs.index)
+            if fit.coef is not None:
+                X, cols, _ = self._design(pairs, m, fit)
+                for col, effect in zip(cols, (X * fit.coef).T):
+                    term = TERM_OF.get(col.split("[")[0], col)
+                    df[term] = df.get(term, 0.0) + effect
+            out[m] = df
         return out
 
     def explain(self, metric: str) -> Dict[str, float]:

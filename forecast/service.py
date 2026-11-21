@@ -130,12 +130,17 @@ class ForecastService:
         return cur.assign(style_similarity=np.round(sim * 100, 1)).nlargest(k, "style_similarity")
 
     # ── the two questions ─────────────────────────────────────
-    def project(self, players: pd.DataFrame, to_team: Optional[str] = None) -> pd.DataFrame:
+    def project(self, players: pd.DataFrame, to_team: Optional[str] = None, age: Optional[float] = None,
+                minutes: Optional[float] = None) -> pd.DataFrame:
+        """`age` and `minutes` override the player's age and his expected minutes next season
+        (what-if inputs for the command line; the agent leaves them alone)."""
         rows = self._pair_rows(players, to_team)
+        if age is not None:
+            rows["age"] = float(age)
         hist = history_features(self.ps, rows)
         for m in METRICS:
             rows[f"trend_{m}"] = hist[f"trend_{m}"].to_numpy()
-        mins = self.minutes.predict(rows, self.ps)
+        mins = self.minutes.predict(rows, self.ps) if minutes is None else np.full(len(rows), float(minutes))
         pred = self.model.predict(rows, hist, minutes=np.maximum(mins, 900))
         out = pd.concat([rows[["us_id", "name", "team", "league", "group", "age", "minutes",
                                "team_next", "league_next"]], pred], axis=1)
