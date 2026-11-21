@@ -21,6 +21,10 @@ from forecast.config import LEAGUES, METRICS
 
 GROUP_SUB_POSITION = {"CB": "Centre-Back", "FB": "Left-Back", "CM": "Central Midfield",
                       "AM": "Left Winger", "ST": "Centre-Forward"}
+GROUP_SUB_POSITIONS = {"CB": ["Centre-Back"], "FB": ["Left-Back", "Right-Back"],
+                       "CM": ["Central Midfield", "Defensive Midfield"],
+                       "AM": ["Left Winger", "Right Winger", "Attacking Midfield", "Left Midfield", "Right Midfield"],
+                       "ST": ["Centre-Forward", "Second Striker"]}
 GROUP_US_CODE = {"CB": "D", "FB": "D", "CM": "M", "AM": "F M", "ST": "F"}
 # Typical per-90 levels by group (rough, for realism only).
 BASE = {
@@ -84,10 +88,11 @@ def generate(n_players: int = 1500, seasons: Tuple[int, int] = (2014, 2025), see
             rec["goals"], rec["assists"] = round(rec["npxG"]), round(rec["xA"])
             rows.append(rec)
     us = pd.DataFrame(rows)
+    sub_rng = np.random.default_rng(seed + 1)      # separate stream: positions don't shift the stats
     tm_players = pd.DataFrame({
         "player_id": np.arange(n_players), "name": [f"Player {i}" for i in range(n_players)],
         "date_of_birth": [pd.Timestamp(year=int(b), month=1, day=1) + pd.Timedelta(days=int((b % 1) * 365)) for b in birth],
-        "sub_position": [GROUP_SUB_POSITION[g] for g in groups]})
+        "sub_position": [sub_rng.choice(GROUP_SUB_POSITIONS[g]) for g in groups]})
     us_to_tm = {str(i): i for i in range(n_players)}
     team_elo = {(t, lg, s): elo[t] for t, lg in teams for s in range(seasons[0], seasons[1] + 2)}
     return us, tm_players, us_to_tm, team_elo

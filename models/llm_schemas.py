@@ -35,14 +35,33 @@ class SearchConstraints(BaseModel):
 
 
 EmphasisKey = Literal["build_up", "chance_creation", "goal_threat", "shooting", "involvement"]
+PositionKey = Literal["winger", "striker", "attacking_mid", "central_mid", "defensive_mid", "fullback", "centre_back"]
+
+
+class BeatSpec(BaseModel):
+    player: str = Field(description="Player to out-produce, as named.")
+    quality: EmphasisKey = Field(description="What to beat him at: goal_threat for goals or scoring.")
 
 
 class BriefSpec(BaseModel):
     """A scout's free-text brief, read into the forecast model's filters (forecast.brief)."""
 
     interpretation: str = Field(description="One plain sentence restating what the user is asking for.")
-    replace_player: Optional[str] = Field(default=None, description="Player the user wants to replace or find someone "
-                                          "like, as named ('Fofana', 'Rodri'). Null if none.")
+    replace_player: Optional[str] = Field(default=None, description="Player the user wants to REPLACE, as named "
+                                          "('replace Fofana'). Null if none.")
+    similar_to: Optional[str] = Field(default=None, description="Player named as a style reference: 'like Madueke', "
+                                      "'a Madueke type', 'similar to Rodri'. Null if none.")
+    must_beat: List[BeatSpec] = Field(default_factory=list, description="Players the target must out-produce: 'outdo "
+                                      "Saka for goals' -> player 'Saka', quality goal_threat.")
+    positions: List[PositionKey] = Field(default_factory=list, description="Positions wanted. A winger of any kind "
+                                         "(inside, inverted, wide forward) is winger, never striker.")
+    side: Optional[Literal["left", "right"]] = Field(default=None, description="Side mentioned ('can play on the "
+                                                     "left', 'left winger').")
+    side_only: bool = Field(default=False, description="True only if the player must play that side ('a left "
+                                            "winger'); false for 'can play on the left too'.")
+    squad_role: Optional[Literal["starter", "rotation", "backup"]] = Field(default=None, description="Squad role "
+                                                                            "stated: 'backup', 'squad player', 'starter'.")
+    upside: bool = Field(default=False, description="True when the user wants potential or room to grow.")
     target_club: Optional[str] = Field(default=None, description="Club the player would join ('for Chelsea', 'my team "
                                        "is Arsenal'). Null if not stated.")
     role: Optional[RoleKey] = Field(default=None, description="Closest role profile. A goalscoring or inside winger is "

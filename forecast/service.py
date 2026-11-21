@@ -170,8 +170,8 @@ class ForecastService:
             rows[f"trend_{m}"] = hist[f"trend_{m}"].to_numpy()
         mins = self.minutes.predict(rows, self.ps) if minutes is None else np.full(len(rows), float(minutes))
         pred = self.model.predict(rows, hist, minutes=np.maximum(mins, 900))
-        out = pd.concat([rows[["us_id", "name", "team", "league", "group", "age", "minutes",
-                               "team_next", "league_next"]], pred], axis=1)
+        cols = ["us_id", "name", "team", "league", "group", "age", "minutes", "team_next", "league_next"]
+        out = pd.concat([rows[cols + [c for c in ("tm_sub_position",) if c in rows]], pred], axis=1)
         out["expected_minutes"] = mins.round()
         out["market_value_eur"] = out["us_id"].map(self.values)
         return out
@@ -180,7 +180,8 @@ class ForecastService:
                    max_age: Optional[float] = None, max_value_eur: Optional[float] = None, min_minutes: int = 600,
                    leagues: Optional[Iterable[str]] = None, exclude: Iterable[str] = (),
                    min_age: Optional[float] = None, exclude_ids: Iterable[str] = (),
-                   target: Optional[np.ndarray] = None) -> pd.DataFrame:
+                   target: Optional[np.ndarray] = None, sub_positions: Optional[Iterable[str]] = None,
+                   exclude_teams: Iterable[str] = ()) -> pd.DataFrame:
         """Closest players to the role's style (or to `target`), projected to `to_team`, ranked by
         role score. `role_key` is a key of ROLES or a custom RoleProfile (see forecast.brief).
         Adds `value_gap`: how cheap the player looks for his projected output."""
@@ -194,7 +195,11 @@ class ForecastService:
             cur = cur[cur["age"].isna() | (cur["age"] <= max_age)]
         if min_age is not None:
             cur = cur[cur["age"].isna() | (cur["age"] >= min_age)]
-        cur = cur[~cur["us_id"].isin(set(exclude_ids))]
+        cur = cur[~cur["us_id"].isin(set(exclude_ids)) & ~cur["team"].isin(set(exclude_teams))]
+        if sub_positions:
+            # Transfermarkt main position; players without one stay if their group fits (filtered above)
+            sub = cur["tm_sub_position"] if "tm_sub_position" in cur else pd.Series(None, index=cur.index)
+            cur = cur[sub.isna() | sub.isin(set(sub_positions))]
         excl = {e.lower() for e in exclude}
         cur = cur[~cur["name"].str.lower().isin(excl)]
         if max_value_eur is not None:

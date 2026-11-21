@@ -463,3 +463,27 @@ def test_llm_brief_is_checked_against_the_data(service, monkeypatch):
         raise llm.LLMError("quota")
     monkeypatch.setattr(llm, "structured", broken)
     assert brief.understand("striker under 25", service).parser.startswith("rules (Gemini failed")
+
+
+def test_winger_brief_returns_only_wingers_beating_the_bar_and_not_the_clubs_own(service, monkeypatch):
+    """The Madueke case: position comes from Transfermarkt, never from output shape; a 'beat X'
+    bar is applied in code; the target club's players are left out."""
+    from evals.brief_eval import result_checks
+    from forecast import brief
+    from forecast.config import POSITIONS
+    monkeypatch.setattr(settings, "ENABLE_VECTOR_INDEX", False)
+    cur = service.in_latest_season(service.current())
+    wingers = cur[cur["tm_sub_position"].isin(POSITIONS["winger"]) & (cur["minutes"] >= 900)]
+    anchor, rival = wingers.iloc[0], wingers.iloc[1]
+    b = brief.parse(f"a winger like {anchor['name']}, outscore {rival['name']} for goals, "
+                    f"can play on the left too, backup", service)
+    assert b.positions == ["winger"] and b.anchor == "like" and b.side == "left" and not b.side_strict
+    assert b.beat and b.beat[0][1] == "npxG" and b.squad_role == "backup"
+    df, him, _ = brief.search(b, service, n=10)
+    assert not df.empty and set(df["tm_sub_position"]) <= set(POSITIONS["winger"])
+    assert anchor["team"] not in set(df["team"])
+    assert all(ok for _, ok, _ in result_checks(b, df)), result_checks(b, df)
+    strict = brief.parse("a left winger, 20 to 30", service)
+    df2, _, _ = brief.search(strict, service, n=10)
+    assert set(df2["tm_sub_position"]) <= {"Left Winger", "Left Midfield"}
+    assert df2["age"].between(20, 30).all()

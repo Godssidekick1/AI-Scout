@@ -37,7 +37,7 @@ ROLES: Dict[str, RoleProfile] = {r.key: r for r in [
     RoleProfile("poacher", "Poacher", ("ST",), {"npxG": 0.6, "shots": 0.3, "xGChain": 0.1}),
     RoleProfile("complete_forward", "Complete forward", ("ST",),
                 {"npxG": 0.4, "xA": 0.2, "xGChain": 0.25, "key_passes": 0.15}),
-    RoleProfile("inside_forward", "Inside forward", ("AM", "ST"),
+    RoleProfile("inside_forward", "Inside forward", ("AM",),
                 {"npxG": 0.4, "shots": 0.2, "xA": 0.2, "xGChain": 0.2}),
     RoleProfile("creative_winger", "Creative winger", ("AM",),
                 {"xA": 0.35, "key_passes": 0.3, "xGChain": 0.25, "npxG": 0.1}),

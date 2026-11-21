@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from forecast.config import LEAGUES, METRICS
+from forecast.config import LEAGUES, METRICS, POSITIONS, SIDES, groups_for
 from forecast.roles import ROLES, RoleProfile, metric_scales, role_from_text, style_vector
 
 LEAGUE_WORDS: Dict[str, Tuple[str, ...]] = {
@@ -39,12 +39,12 @@ LEAGUE_WORDS: Dict[str, Tuple[str, ...]] = {
 # description words -> metric multipliers
 EMPHASIS: List[Tuple[str, Tuple[str, ...], Dict[str, float]]] = [
     ("build-up / progression", ("progressive", "progression", "passer", "passing", "build-up", "buildup",
-                                "build up", "ball-playing", "ball playing", "distribut", "deep-lying", "carries",
+                                "build up", "ball-playing", "progress", "possession", "steps into", "ball playing", "distribut", "deep-lying", "carries",
                                 "carrier", "on the ball"),
      {"xGBuildup": 2.0, "xGChain": 1.5}),
     ("chance creation", ("creative", "creator", "creat", "assist", "playmak", "vision", "key pass", "chances for"),
      {"xA": 2.0, "key_passes": 2.0}),
-    ("goal threat", ("goals", "goal threat", "goalscor", "scorer", "finisher", "clinical", "box presence", "poach"),
+    ("goal threat", ("goals", "goal threat", "goalscor", "scorer", "scores", "into the box", "scoring", "finisher", "clinical", "box presence", "poach"),
      {"npxG": 2.0, "shots": 1.5}),
     ("shooting volume", ("shooter", "shots", "shoots"), {"shots": 2.0}),
     ("involvement", ("involved", "link-up", "link up", "combination", "combines"), {"xGChain": 2.0}),
@@ -53,7 +53,7 @@ UNMEASURED = ("track back", "tracks back", "tracking back", "work rate", "hard-w
               "versatil", "any formation", "formations", "any system", "multiple positions", "two-footed", "leader",
               "mentality", "attitude", "tackl", "intercept", "aerial", "header", "defensive", "defending", "duel",
               "pace", "fast",
-              "quick", "physical", "tall", "in the air", "pressing", "work rate", "saves", "shot-stopp", "keeper")
+              "quick", "physical", "tall", "in the air", "pressing", "work rate", "saves", "shot-stopp", "keeper", "goalkeeper")
 HIDDEN = ("hidden", "unknown", "under the radar", "under-the-radar", "bargain", "undervalued", "underrated",
           "cheap", "value for money", "gem", "unexpected")
 CLUB_ALIASES = {"man city": "Manchester City", "man utd": "Manchester United", "man united": "Manchester United",
@@ -90,19 +90,41 @@ class Brief:
     sort: str = "fit"
     note: str = ""
     parser: str = "rules"
-    interpretation: str = ""                          # "fit" (projected output in the profile) or "value" (value gap)
+    interpretation: str = ""
     unmeasured: List[str] = field(default_factory=list)
+    anchor: str = "replacing"                 # "replacing" him, or a style reference ("like")
+    positions: List[str] = field(default_factory=list)    # keys of forecast.config.POSITIONS
+    side: Optional[str] = None                # "left" / "right"
+    side_strict: bool = False                 # only that side, vs "can play there too"
+    beat: List[Tuple[pd.Series, str]] = field(default_factory=list)   # (player, metric) to out-produce per 90
+    beat_query: List[str] = field(default_factory=list)  # names that matched nobody
+    squad_role: Optional[str] = None          # starter / rotation / backup
+    exclude_own_club: bool = True             # leave the target club's own players out
+    bars: List[Tuple[str, str, float]] = field(default_factory=list)  # filled by search(): (name, metric, per 90)
 
     def describe(self) -> List[str]:
         out = []
         if self.replace is not None:
             r = self.replace
             age = f", {r['age']:.0f}" if pd.notna(r.get("age")) else ""
-            out.append(f"replacing {r['name']} ({r['team']}, {r['group']}{age}): matching his style")
+            what = "replacing" if self.anchor == "replacing" else "style like"
+            out.append(f"{what} {r['name']} ({r['team']}, {r['group']}{age})")
         elif self.replace_query:
             out.append(f"no player matched '{self.replace_query}' (ignored; try the full name)")
+        if self.positions:
+            out.append("position: " + ", ".join(p.replace("_", " ") for p in self.positions))
+        if self.side:
+            out.append(f"{self.side} side " + ("only" if self.side_strict else "preferred (shown in pos column)"))
         if self.role:
             out.append(f"type: {ROLES[self.role].label}")
+        bars = {(n, m): v for n, m, v in self.bars}
+        for p, m in self.beat:
+            v = bars.get((p["name"], m))
+            out.append(f"must beat {p['name']}'s projected {m}/90" + (f" ({v:.2f})" if v is not None else ""))
+        for q in self.beat_query:
+            out.append(f"no player matched '{q}' to compare with")
+        if self.squad_role:
+            out.append(f"squad role: {self.squad_role}")
         if self.emphasis_labels:
             out.append("emphasis: " + ", ".join(self.emphasis_labels))
         if self.to_team:
@@ -120,7 +142,9 @@ class Brief:
             out.append(f"projected {self.min_goals:g}+ goals next season (npxG over his expected minutes)")
         if self.min_assists is not None:
             out.append(f"projected {self.min_assists:g}+ assists next season (xA over his expected minutes)")
-        out.append("sorted by value gap (hidden talent)" if self.sort == "value" else "sorted by projected output")
+        if self.to_team and self.exclude_own_club:
+            out.append(f"excluding {self.to_team}'s own players")
+        out.append("sorted by value gap (cheap for the output)" if self.sort == "value" else "sorted by projected output")
         return out
 
 
@@ -155,10 +179,11 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     # who to replace: explicit, else a pattern in the text
     name = replace
     if not name:
-        for pat in NAME_PATTERNS:
+        for i, pat in enumerate(NAME_PATTERNS):
             m = re.search(pat, raw, flags=re.IGNORECASE if "[A-Z]" not in pat else 0)
             if m and service.find(m.group("n").strip()) is not None:
                 name = m.group("n").strip()
+                b.anchor = "like" if i == 1 else "replacing"
                 break
     if name:
         hit = service.find(name)
@@ -186,27 +211,30 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     if (m := re.search(r"\b(?:aged?\s*|between\s*|from\s*)?(\d{2})\s*(?:-|\u2013|to|and)\s*(\d{2})\b(?!\s*\+?\s*(?:goals|assists|min))",
                        t_age)) and 15 <= int(m.group(1)) < int(m.group(2)) <= 40:
         b.min_age, b.max_age = float(m.group(1)), float(m.group(2))
-    elif m := re.search(r"\b(?:under|below|younger than|less than|max(?:imum)? age|aged? under|u-?|<)\s*(\d{2})s?\b", t_age):
-        b.max_age = float(m.group(1)) - (1 if not re.search(r"\bu-?\d{2}", m.group(0)) else 0)
+    elif m := re.search(r"\b(?:under|below|younger than|less than|max(?:imum)? age(?: of)?|aged? under|u-?|<)\s*(\d{2})s?\b", t_age):
+        strict = re.match(r"(under|below|younger than|less than|aged? under|<)", m.group(0))
+        b.max_age = float(m.group(1)) - (1 if strict else 0)
     elif m := re.search(r"\b(\d{2})\s*(?:or|and)\s*(?:younger|under)\b", t_age):
         b.max_age = float(m.group(1))
     elif re.search(r"\byounger\b", t_age):
         b.max_age = float(b.replace["age"]) - 1 if b.replace is not None and pd.notna(b.replace.get("age")) else 24
     elif re.search(r"\b(young|youngster|prospect|wonderkid|teenager)\b", t_age):
         b.max_age = 23
-    if m := re.search(r"\b(?:over|older than|at least)\s*(\d{2})\b", t_age):
+    if (m := re.search(r"\b(?:over|older than|at least|min(?:imum)? age(?: of)?)\s*(\d{2})\b(?!\s*\+?\s*(?:goals|assists|min|m\b))",
+                       t_age)) and 15 <= int(m.group(1)) <= 40:
         b.min_age = float(m.group(1))
-    elif re.search(r"\b(experienced|veteran|proven)\b", t_age):
+    elif b.min_age is None and re.search(r"\b(experienced|veteran)\b", t_age):
         b.min_age = 27
 
     # leagues
     excluded = [lg for lg, words in LEAGUE_WORDS.items()
-                if any(re.search(rf"\b(?:outside|not|except|excluding|no)\s+(?:(?:the|in|from|of)\s+)*{re.escape(w)}\b", t)
+                if any(re.search(rf"\b(?:outside|not|except|excluding|no|but)\s+(?:(?:the|in|from|of)\s+)*{re.escape(w)}\b", t)
                        for w in words)]
     included = [lg for lg, words in LEAGUE_WORDS.items() if lg not in excluded
                 and any(re.search(rf"\b(?:from|in|playing in|based in)\s+(?:the\s+)?{re.escape(w)}\b", t) for w in words)]
-    if included:
-        b.leagues = included
+    if included:   # "from Serie A or the Bundesliga": every league named alongside counts
+        named = [lg for lg, words in LEAGUE_WORDS.items() if lg not in excluded and any(_has(t, w) for w in words)]
+        b.leagues = named
     elif excluded:
         b.leagues = [lg for lg in LEAGUES if lg not in excluded]
 
@@ -232,7 +260,70 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     b.unmeasured = sorted({c for c in UNMEASURED if _has(t, c)})
     if any(_has(t, c) for c in HIDDEN):
         b.sort = "value"
+
+    # positions and side
+    for key, cues in POSITION_CUES:
+        if any(_has(t, c) for c in cues) and key not in b.positions:
+            b.positions.append(key)
+    if "striker" in b.positions and re.search(r"inside forward|wide forward", t):
+        b.positions.remove("striker")
+    for side in ("left", "right"):
+        if re.search(rf"\b{side}(?:\s+wing(?:er)?|-sided|\s+side|\s+flank)|on the {side}|\b{side}[- ]?(?:back|mid)", t):
+            b.side = b.side or side
+            b.side_strict = not re.search(r"\b(too|also|as well|either|both)\b", t)
+
+    # out-produce a named player ("outdo Saka for goal scoring")
+    for m in re.finditer(r"(?:outdo|outscore|out-score|outperform|out-produce|better than|beat|more goals than|more "
+                         r"assists than)\s+(?P<n>[a-z][\w'\-]*(?:\s+(?!(?:for|at|in|on|and|who|with)\b)[a-z][\w'\-]*)?)(?:\s+(?:for|at|in|on)\s+(?P<q>[a-z\- ]+))?",
+                         raw.lower()):
+        who = m.group("n").strip()
+        hit = service.find(who)
+        if hit is None:
+            hit = service.find(who.split()[0])
+        q = (m.group("q") or "") + " " + m.group(0)
+        metric = ("xA" if re.search(r"assist|creat|chance", q) else "shots" if "shot" in q
+                  else "xGBuildup" if re.search(r"pass|build", q) else "npxG")
+        if hit is not None and all(hit["us_id"] != p["us_id"] for p, _ in b.beat):
+            b.beat.append((hit, metric))
+
+    # squad role
+    if re.search(r"\brotation\b", t):
+        b.squad_role = "rotation"
+    elif re.search(r"\b(back-?up|understudy|deputy|squad player|cover)\b", t):
+        b.squad_role = "backup"
+    elif re.search(r"\b(starter|first[- ]choice|nailed)\b", t):
+        b.squad_role = "starter"
+    apply_squad_role(b, upside=bool(re.search(r"potential|upside|develop|grow into|room to grow", t)))
     return b
+
+
+POSITION_CUES = [
+    ("winger", ("winger", "wide player", "inside forward", "wide forward", "wide attacker", " rw", " lw")),
+    ("striker", ("striker", "centre-forward", "center-forward", "centre forward", "number 9", "no.9", "no. 9")),
+    ("attacking_mid", ("attacking midfielder", "number 10", "no.10", "no. 10", "playmaker")),
+    ("defensive_mid", ("defensive midfielder", "holding midfielder", "number 6", "no.6", "anchor", "regista")),
+    ("central_mid", ("central midfielder", "box-to-box", "box to box", "number 8", "no.8")),
+    ("fullback", ("full-back", "fullback", "full back", "wing-back", "wingback", "right-back", "left-back")),
+    ("centre_back", ("centre-back", "center-back", "centre back", "center back", "cb")),
+]
+POSITION_ROLE = {"winger": "creative_winger", "striker": "complete_forward", "attacking_mid": "playmaker",
+                 "central_mid": "box_to_box", "defensive_mid": "deep_playmaker", "fullback": "attacking_fullback",
+                 "centre_back": "ball_playing_cb"}
+ROLE_POSITIONS = {"creative_winger": ["winger"], "inside_forward": ["winger"], "poacher": ["striker"],
+                  "complete_forward": ["striker"], "attacking_fullback": ["fullback"], "ball_playing_cb": ["centre_back"]}
+
+
+def apply_squad_role(b: Brief, upside: bool = False) -> None:
+    """A starter needs a proven sample; a backup only a usable one, and should come cheap for his
+    output, so backups are sorted by value gap unless a budget already caps the price."""
+    if b.squad_role == "starter":
+        b.min_minutes = max(b.min_minutes, 1800)
+    elif b.squad_role in ("backup", "rotation"):
+        b.min_minutes = min(b.min_minutes, 450)
+        if b.max_value_eur is None:
+            b.sort = "value"
+    if upside and b.max_age is None:
+        b.max_age = 24
 
 
 EMPHASIS_KEYS = {"build_up": "build-up / progression", "chance_creation": "chance creation",
@@ -273,7 +364,8 @@ def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> B
     """Check an LLM reading against the data: the player and club must exist, roles and
     leagues come from fixed lists, and an age 'younger than him' is computed here."""
     b = Brief(text=text, parser="Gemini", interpretation=spec.interpretation)
-    name = replace or spec.replace_player
+    name = replace or spec.replace_player or spec.similar_to
+    b.anchor = "replacing" if (replace or spec.replace_player) else "like"
     if name:
         hit = service.find(name)
         if hit is None:
@@ -308,7 +400,23 @@ def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> B
     b.min_goals, b.min_assists = spec.min_goals, spec.min_assists
     b.sort = "value" if spec.hidden_talent else "fit"
     b.unmeasured = list(dict.fromkeys(u.strip().lower() for u in spec.unmeasured if u.strip()))
+    b.positions = [p for p in dict.fromkeys(spec.positions) if p in POSITIONS]
+    b.side, b.side_strict = spec.side, bool(spec.side and spec.side_only)
+    for beat in spec.must_beat:
+        hit = service.find(beat.player)
+        if hit is None:
+            b.beat_query.append(beat.player)
+        else:
+            b.beat.append((hit, BEAT_METRIC[beat.quality]))
+    b.squad_role = spec.squad_role
+    apply_squad_role(b, upside=spec.upside)
+    if spec.min_minutes:                       # an explicit minutes ask wins over the squad-role default
+        b.min_minutes = int(spec.min_minutes)
     return b
+
+
+BEAT_METRIC = {"goal_threat": "npxG", "chance_creation": "xA", "shooting": "shots", "build_up": "xGBuildup",
+               "involvement": "xGChain"}
 
 
 def profile(b: Brief, service) -> Tuple[RoleProfile, Optional[np.ndarray]]:
@@ -332,11 +440,20 @@ def profile(b: Brief, service) -> Tuple[RoleProfile, Optional[np.ndarray]]:
         groups = tuple(dict.fromkeys((b.replace["group"],) + (role.groups if role is not None else ())))
         label = f"{b.replace['name']}-like" + (f" {role.label.lower()}" if role else "")
     else:
+        if role is None and (b.positions or b.emphasis):
+            # a position without a role: its default role, so the search always has a profile
+            role = ROLES[POSITION_ROLE.get(b.positions[0] if b.positions else "", "complete_forward")]
+            if b.positions and b.positions[0] == "winger" and b.emphasis.get("npxG", 1) > 1:
+                role = ROLES["inside_forward"]
         if role is None:
-            raise ValueError("Name a player to replace, or describe the type of player (e.g. 'deep-lying playmaker').")
+            raise ValueError("Say what kind of player: a position (winger, centre-back...), a style, or a player "
+                             "to replace or compare with. Goalkeepers are not covered by the free data.")
         weights = np.array([role.weights.get(m, 0.0) for m in METRICS]) * mult
         target = None if not b.emphasis else weights
         groups, label = role.groups, role.label
+    positions = b.positions or ROLE_POSITIONS.get(b.role or "", [])
+    if positions:
+        groups = groups_for(positions)
     weights = weights / max(weights.sum(), 1e-9)
     if target is not None:
         target = target / max(np.linalg.norm(target), 1e-9)
@@ -350,12 +467,23 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
     """Ranked shortlist for a brief, plus the replaced player's own projection (as a yardstick)."""
     from forecast.roles import role_scores
     prof, target = profile(b, service)
-    thresholds = b.min_goals is not None or b.min_assists is not None
+    thresholds = b.min_goals is not None or b.min_assists is not None or bool(b.beat)
     pool_n = max(n * 6, 120) if thresholds else (max(n, 25) if b.sort == "value" else n)
+    positions = b.positions or ROLE_POSITIONS.get(b.role or "", [])
+    subs = {s for p in positions for s in POSITIONS[p]}
+    if b.side and b.side_strict:
+        subs = (subs & set(SIDES[b.side])) or set(SIDES[b.side])
+    excl_ids = ([b.replace["us_id"]] if b.replace is not None else []) + [p["us_id"] for p, _ in b.beat]
     df = service.candidates(prof, n=pool_n, to_team=b.to_team, max_age=b.max_age,
                             min_age=b.min_age, max_value_eur=b.max_value_eur, min_minutes=b.min_minutes,
-                            leagues=b.leagues, exclude=exclude,
-                            exclude_ids=[b.replace["us_id"]] if b.replace is not None else (), target=target)
+                            leagues=b.leagues, exclude=exclude, exclude_ids=excl_ids, target=target,
+                            sub_positions=subs or None,
+                            exclude_teams=[b.to_team] if b.to_team and b.exclude_own_club else ())
+    bars = []                                  # (label, metric, per-90 bar) from players to out-produce
+    for p, m in b.beat:
+        ref = service.project(p.to_frame().T.infer_objects(), b.to_team if p["team"] != b.to_team else None).iloc[0]
+        bars.append((p["name"], m, float(ref[f"pred_{m}"])))
+    b.bars = bars
     him = None
     if b.replace is not None:
         him = service.project(b.replace.to_frame().T.infer_objects(), b.to_team).iloc[0].copy()
@@ -370,13 +498,15 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
             keep &= (df["pred_npxG"] * season >= b.min_goals).to_numpy()
         if b.min_assists is not None:
             keep &= (df["pred_xA"] * season >= b.min_assists).to_numpy()
+        for _, m, bar in bars:
+            keep &= (df[f"pred_{m}"] >= bar).to_numpy()
         df = df.assign(proj_goals=(df["pred_npxG"] * season).round(1), proj_assists=(df["pred_xA"] * season).round(1))
         if keep.any():
             df = df[keep].reset_index(drop=True)
         else:   # nobody reaches the target: show the closest instead of an empty list
             b.note = "Nobody is projected to reach that target; showing the closest."
-            df = df.sort_values("proj_goals" if b.min_goals is not None else "proj_assists",
-                                ascending=False).reset_index(drop=True)
+            key = (f"pred_{bars[0][1]}" if bars else "proj_goals" if b.min_goals is not None else "proj_assists")
+            df = df.sort_values(key, ascending=False).reset_index(drop=True)
     if not df.empty and b.sort == "value":
         df = df.sort_values("value_gap", ascending=False, na_position="last")
     return df.head(n).reset_index(drop=True), him, prof

@@ -30,7 +30,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
-from forecast.config import LEAGUES, METRICS, season_label
+from forecast.config import LEAGUES, METRICS, POSITION_SHORT, season_label
 from forecast.model import history_features
 from forecast.roles import ROLES, role_from_text
 from forecast.service import ForecastService, artifact_path
@@ -178,7 +178,7 @@ UNMEASURED_WORDS = {"tackl": "tackling", "intercept": "interceptions", "aerial":
                     "two-footed": "weaker foot", "leader": "leadership", "mentality": "mentality",
                     "attitude": "attitude (the agent's news check covers this)",
                     "pressing": "pressing", "work rate": "work rate", "saves": "shot-stopping",
-                    "shot-stopp": "shot-stopping", "keeper": "goalkeeping"}
+                    "shot-stopp": "shot-stopping", "keeper": "goalkeeping", "goalkeeper": "goalkeeping"}
 
 
 def run_brief(service: ForecastService, text: str, replace: Optional[str] = None, n: int = 10,
@@ -213,12 +213,14 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
         print("\nNo players pass these filters. Loosen the age, value, league or minutes limits." + extra)
         return
 
+    for name, m, bar in b.bars:
+        print(f"Bar to beat: {name}'s projected {m} per 90 = {bar:.2f}")
     if b.note:
         print("\n" + b.note)
     shown = [m for m, _ in sorted(prof.weights.items(), key=lambda x: -x[1])][:3]
     extra = [c for c in ("proj_goals", "proj_assists") if c in df and getattr(b, "min_" + c[5:]) is not None]
     score_col = "vs him" if him is not None else "score"
-    head = (f"{'#':>3}  {'player':<23}{'club':<19}{'lg':<7}{'age':>4}{'min':>6}{'style':>6}{score_col:>7}"
+    head = (f"{'#':>3}  {'player':<23}{'club':<19}{'lg':<7}{'pos':<4}{'age':>4}{'min':>6}{'style':>6}{score_col:>7}"
             f"{'gap':>6}{'EUR M':>7}" + "".join(f"{m[:9]:>10}" for m in shown)
             + "".join(f"{c[5:]:>8}" for c in extra))
     print("\n" + head)
@@ -229,8 +231,9 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
         val = f"{r['market_value_eur'] / 1e6:.1f}" if pd.notna(r["market_value_eur"]) else "?"
         gap = f"{r['value_gap']:+.1f}" if pd.notna(r.get("value_gap", np.nan)) else ""
         sty = f"{r['style_similarity']:.0f}" if pd.notna(r.get("style_similarity", np.nan)) else ""
+        pos = POSITION_SHORT.get(r.get("tm_sub_position"), r.get("group", ""))
         return (f"{i:>3}  {str(r['name'])[:22]:<23}{str(r['team'])[:18]:<19}{LEAGUE_SHORT.get(r['league'], r['league'])[:6]:<7}"
-                f"{age:>4}{r['minutes']:>6.0f}{sty:>6}{score:>7}{gap:>6}{val:>7}"
+                f"{pos:<4}{age:>4}{r['minutes']:>6.0f}{sty:>6}{score:>7}{gap:>6}{val:>7}"
                 + "".join(f"{r[f'pred_{m}']:>10.2f}" for m in shown)
                 + "".join(f"{r[c]:>8.1f}" if c in r and pd.notna(r[c]) else f"{'':>8}" for c in extra))
 

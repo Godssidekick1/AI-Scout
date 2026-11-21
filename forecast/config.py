@@ -35,6 +35,28 @@ _TM_SUB_POSITION_GROUP = {
 }
 
 
+# Finer positions a brief can ask for (Transfermarkt main position; it lists one per player).
+POSITIONS = {
+    "winger": ("Left Winger", "Right Winger", "Left Midfield", "Right Midfield"),
+    "striker": ("Centre-Forward", "Second Striker"),
+    "attacking_mid": ("Attacking Midfield",),
+    "central_mid": ("Central Midfield",),
+    "defensive_mid": ("Defensive Midfield",),
+    "fullback": ("Left-Back", "Right-Back"),
+    "centre_back": ("Centre-Back",),
+}
+SIDES = {"left": ("Left Winger", "Left Midfield", "Left-Back"), "right": ("Right Winger", "Right Midfield", "Right-Back")}
+POSITION_SHORT = {"Left Winger": "LW", "Right Winger": "RW", "Left Midfield": "LM", "Right Midfield": "RM",
+                  "Centre-Forward": "CF", "Second Striker": "SS", "Attacking Midfield": "AM",
+                  "Central Midfield": "CM", "Defensive Midfield": "DM", "Left-Back": "LB", "Right-Back": "RB",
+                  "Centre-Back": "CB"}
+
+
+def groups_for(positions) -> tuple:
+    """Position groups that contain these finer positions (for players with no Transfermarkt match)."""
+    return tuple(dict.fromkeys(_TM_SUB_POSITION_GROUP[s] for p in positions for s in POSITIONS[p]))
+
+
 def position_group(tm_sub_position: Optional[str] = None, understat_position: str = "") -> Optional[str]:
     """Map a Transfermarkt sub-position (preferred) or an Understat code string to a group.
     Goalkeepers return None: v3 does not model them until event data is available."""
