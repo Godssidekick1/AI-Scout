@@ -1,240 +1,104 @@
 """
-Agent 4: Financial Analyst ("The Accountant")
-=============================================
-Analyzes market value, contract situations, and financial viability.
-Uses Transfermarkt data + statistical output to calculate value-for-money.
+Step 4b: Financial Analyst (runs in parallel with the background checker)
+=========================================================================
+Pure Python over the Transfermarkt profile the verifier already fetched:
+market value (estimated, and flagged as such, when missing), contract length,
+wage estimate, value-for-money and feasibility against the budget.
 """
 
 import asyncio
 import logging
-from typing import Dict, List
+import re
+from datetime import date, datetime
+from typing import Dict, Optional
 
-from langchain_core.messages import AIMessage
-
-from data_sources.transfermarkt_source import TransfermarktSource
-from data_sources.data_cache import DataCache
-from config import settings
+from core.context import get_context
+from core.tracing import traced_node
+from models.llm_schemas import SearchConstraints
+from models.scouting_report import FinancialAssessment
 
 logger = logging.getLogger(__name__)
 
 
-def analyze_finances(state: Dict) -> Dict:
-    """
-    Assess financial viability for all candidates.
-    """
-    candidates = state.get("candidate_pool", [])
-    budget_max = state.get("budget_max")
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                assessments = pool.submit(
-                    asyncio.run, _async_analyze(candidates, budget_max)
-                ).result()
-        else:
-            assessments = asyncio.run(_async_analyze(candidates, budget_max))
-    except RuntimeError:
-        assessments = asyncio.run(_async_analyze(candidates, budget_max))
-
-    state["financial_assessments"] = state.get("financial_assessments", []) + assessments
-    state["messages"] = [
-        AIMessage(content=f"💰 Completed financial analysis for {len(assessments)} candidates. "
-                          f"Assessed market values, contracts, and value-for-money.")
-    ]
-
-    return state
-
-
-async def _async_analyze(candidates: List[Dict], budget_max: float = None) -> List[Dict]:
-    """Fetch financial data and compute viability scores."""
-    cache = DataCache(
-        cache_dir=settings.CACHE_DIR,
-        ttl_hours=168,  # 7-day cache for financial data
-    )
-    tmk = TransfermarktSource(cache=cache)
-
-    assessments = []
-
-    for candidate in candidates[:10]:
-        name = candidate.get("name", "Unknown")
-        age = candidate.get("age", 25)
-
-        assessment = {
-            "player_name": name,
-            "current_market_value_eur": 0,
-            "contract_end_date": "",
-            "years_remaining": 0,
-            "agent": "",
-            "release_clause_eur": None,
-            "estimated_wage_weekly_eur": 0,
-            "value_for_money_score": 50.0,
-            "transfer_feasibility": "Unknown",
-        }
-
-        # --- Fetch from Transfermarkt ---
-        if settings.ENABLE_TRANSFERMARKT:
-            try:
-                tm_data = await tmk.get_player_stats(name)
-                if tm_data:
-                    assessment["current_market_value_eur"] = tm_data.get("market_value_eur", 0)
-                    assessment["contract_end_date"] = tm_data.get("contract_end_date", "")
-                    assessment["agent"] = tm_data.get("agent", "")
-
-                    # Estimate years remaining
-                    if assessment["contract_end_date"]:
-                        assessment["years_remaining"] = _estimate_years_remaining(
-                            assessment["contract_end_date"]
-                        )
-            except Exception as e:
-                logger.debug(f"Transfermarkt financial fetch failed for {name}: {e}")
-
-        # --- Estimate market value if not found ---
-        if assessment["current_market_value_eur"] == 0:
-            assessment["current_market_value_eur"] = _estimate_market_value(candidate, age)
-
-        # --- Estimate weekly wages ---
-        assessment["estimated_wage_weekly_eur"] = _estimate_wages(
-            assessment["current_market_value_eur"], age
-        )
-
-        # --- Value-for-money score ---
-        assessment["value_for_money_score"] = _calculate_value_for_money(
-            candidate, assessment, age
-        )
-
-        # --- Transfer feasibility ---
-        market_value = assessment["current_market_value_eur"]
-        years_left = assessment["years_remaining"]
-
-        if budget_max and market_value:
-            if market_value <= budget_max * 0.6:
-                assessment["transfer_feasibility"] = "Easy"
-            elif market_value <= budget_max * 0.9:
-                assessment["transfer_feasibility"] = "Moderate"
-            elif market_value <= budget_max:
-                assessment["transfer_feasibility"] = "Tight"
-            else:
-                assessment["transfer_feasibility"] = "Over budget"
-        elif years_left and years_left < 1.5:
-            assessment["transfer_feasibility"] = "bargain — contract near expiry"
-        else:
-            assessment["transfer_feasibility"] = "Moderate"
-
-        assessments.append(assessment)
-
-    return assessments
-
-
-def _estimate_market_value(stats: Dict, age: int) -> float:
-    """Estimate market value from stats and age when Transfermarkt data is missing."""
-    base = 15.0  # Base value in millions
-
-    # Output-based value
-    base += stats.get("goals_p90", 0) * 25
-    base += stats.get("assists_p90", 0) * 18
-    base += stats.get("xG_p90", 0) * 12
-    base += stats.get("xA_p90", 0) * 10
-
-    # Age adjustment
-    if age < 22:
-        base *= 1.4    # High upside premium
-    elif age < 25:
-        base *= 1.2    # Peak market value age
-    elif age < 28:
-        base *= 1.0
-    elif age < 30:
-        base *= 0.8
-    else:
-        base *= 0.5     # Depreciating
-
-    # League adjustment
-    league_multipliers = {
-        "premier_league": 1.5,
-        "bundesliga": 1.2, "la_liga": 1.2,
-        "serie_a": 1.1, "ligue_1": 1.0,
-        "eredivisie": 0.8, "primeira_liga": 0.75,
+@traced_node("financial_analyst")
+async def analyze_finances(state: Dict) -> Dict:
+    c = SearchConstraints.model_validate(state["constraints"])
+    candidates = state.get("candidates", [])
+    results = await asyncio.gather(*(assess(cand, c.budget_max_m) for cand in candidates))
+    return {
+        "financial_assessments": {a.player_id: a.model_dump() for a in results},
+        "messages": [f"Financial analysis done for {len(results)} candidates."],
     }
-    league = stats.get("league", "").lower().replace(" ", "_")
-    base *= league_multipliers.get(league, 0.7)
 
+
+async def assess(cand: Dict, budget: Optional[float]) -> FinancialAssessment:
+    market = await get_context().market_profile(cand["name"]) or {}
+    a = FinancialAssessment(player_id=cand["player_id"], player_name=cand["name"])
+    age = cand.get("age") or 25
+
+    a.current_market_value_eur = cand.get("market_value_eur_m") or market.get("market_value_eur") or 0.0
+    if not a.current_market_value_eur:
+        a.current_market_value_eur = estimate_market_value(cand, age)
+        a.market_value_is_estimate = True
+    a.contract_end_date = cand.get("contract_end_date") or market.get("contract_end_date") or ""
+    a.agent = cand.get("agent") or market.get("agent") or ""
+    a.years_remaining = years_remaining(a.contract_end_date)
+    a.estimated_wage_weekly_eur = estimate_wages(a.current_market_value_eur, age)
+    a.value_for_money_score = value_for_money(cand, a.current_market_value_eur, a.years_remaining, age)
+    a.transfer_feasibility = feasibility(a.current_market_value_eur, a.years_remaining, budget)
+    return a
+
+
+def estimate_market_value(stats: Dict, age: int) -> float:
+    """Rough fallback when Transfermarkt has no value. Always flagged as an estimate."""
+    base = 10.0 + stats.get("npxG_p90", 0) * 40 + stats.get("xA_p90", 0) * 40 + stats.get("xGChain_p90", 0) * 20
+    base *= 1.4 if age < 22 else 1.2 if age < 25 else 1.0 if age < 28 else 0.8 if age < 30 else 0.5
+    base *= {"premier_league": 1.5, "la_liga": 1.2, "bundesliga": 1.2, "serie_a": 1.1, "ligue_1": 1.0}.get(
+        stats.get("league", ""), 0.8)
     return round(base, 1)
 
 
-def _estimate_wages(market_value: float, age: int) -> float:
-    """Estimate weekly wages from market value."""
-    # Rough heuristic: weekly wage ≈ market_value * 2000-4000 EUR
-    # Higher for older established players, lower for young prospects
-    if age < 22:
-        factor = 2000
-    elif age < 26:
-        factor = 3000
-    elif age < 30:
-        factor = 3500
-    else:
-        factor = 2500
-
-    return round(market_value * factor)
+def estimate_wages(market_value_m: float, age: int) -> float:
+    factor = 2000 if age < 22 else 3000 if age < 26 else 3500 if age < 30 else 2500
+    return round(market_value_m * factor)
 
 
-def _estimate_years_remaining(contract_end: str) -> float:
-    """Estimate years remaining from contract end date."""
-    try:
-        from datetime import datetime
-        end_date = datetime.strptime(contract_end.strip(), "%b %d, %Y")
-        now = datetime.now()
-        delta = end_date - now
-        return round(max(delta.days / 365, 0), 1)
-    except (ValueError, TypeError):
+_DATE_FORMATS = ("%b %d, %Y", "%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y")
+
+
+def years_remaining(contract_end: str, today: Optional[date] = None) -> Optional[float]:
+    if not contract_end:
+        return None
+    text = re.sub(r"\s+", " ", contract_end).strip()
+    today = today or date.today()
+    for fmt in _DATE_FORMATS:
         try:
-            from datetime import datetime
-            end_date = datetime.strptime(contract_end.strip(), "%Y-%m-%d")
-            now = datetime.now()
-            delta = end_date - now
-            return round(max(delta.days / 365, 0), 1)
-        except (ValueError, TypeError):
-            return 2.0  # Default assumption
+            end = datetime.strptime(text, fmt).date()
+            return round(max((end - today).days / 365, 0), 1)
+        except ValueError:
+            continue
+    return None
 
 
-def _calculate_value_for_money(stats: Dict, financial: Dict, age: int) -> float:
-    """
-    Calculate value-for-money score (0-100).
-    Combines statistical output with cost and contract length.
-    """
-    market_value = financial.get("current_market_value_eur", 1)
-    if market_value <= 0:
-        market_value = 1
+def value_for_money(stats: Dict, value_m: float, years_left: Optional[float], age: int) -> float:
+    output = stats.get("npxG_p90", 0) * 60 + stats.get("xA_p90", 0) * 60 + stats.get("xGChain_p90", 0) * 30
+    age_factor = 1.3 if age < 23 else 1.1 if age < 26 else 1.0 if age < 29 else 0.75
+    contract_factor = 1.0 if years_left is None else 1.3 if years_left < 1.5 else 0.85 if years_left > 3 else 1.0
+    # Output per EUR 1M, squashed to 0-100: r / (r + 1) gives 50 at one output point per million
+    # and approaches 100 only for exceptional output at a low price.
+    r = output * age_factor * contract_factor / max(value_m, 1.0)
+    return round(100 * r / (r + 1), 1)
 
-    # Statistical output score
-    output = (
-        stats.get("goals_p90", 0) * 15 +
-        stats.get("assists_p90", 0) * 12 +
-        stats.get("xG_p90", 0) * 10 +
-        stats.get("xA_p90", 0) * 8 +
-        stats.get("xT_p90", 0) * 6
-    )
 
-    # Age factor (younger = better value for resale)
-    if age < 23:
-        age_factor = 1.3
-    elif age < 26:
-        age_factor = 1.1
-    elif age < 29:
-        age_factor = 1.0
-    else:
-        age_factor = 0.75
-
-    # Contract factor (more years = selling club has leverage = higher price)
-    years_left = financial.get("years_remaining", 2)
-    contract_factor = 1.0
-    if years_left < 1.5:
-        contract_factor = 1.3  # Bargain potential
-    elif years_left > 3:
-        contract_factor = 0.85  # Expensive
-
-    # Value ratio
-    value_ratio = (output * age_factor * contract_factor) / (market_value / 10)
-    score = min(round(value_ratio * 100, 1), 100)
-
-    return max(score, 0)
+def feasibility(value_m: float, years_left: Optional[float], budget: Optional[float]) -> str:
+    if budget and value_m:
+        if value_m <= budget * 0.6:
+            return "Easy"
+        if value_m <= budget * 0.9:
+            return "Moderate"
+        if value_m <= budget:
+            return "Tight"
+        return "Over budget"
+    if years_left is not None and years_left < 1.5:
+        return "Bargain: contract near expiry"
+    return "Moderate"

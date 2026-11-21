@@ -38,10 +38,10 @@ LEAGUE_COEFFICIENTS = {
 
 # Offensive metrics that get "taxed" (scaled down for weaker leagues)
 OFFENSIVE_METRICS = [
-    "goals_p90", "assists_p90", "xG_p90", "xA_p90",
+    "goals_p90", "assists_p90", "xG_p90", "xA_p90", "npxG_p90",
+    "shots_p90", "key_passes_p90", "xGChain_p90", "xGBuildup_p90",
     "xT_p90", "shot_creating_actions_p90",
-    "progressive_carries_p90", "passes_into_penalty_area_p90",
-    "pv_plus", "key_passes_p90",
+    "progressive_carries_p90", "passes_into_penalty_area_p90", "pv_plus",
 ]
 
 # Defensive metrics that scale up (defending in high-intensity leagues is harder)

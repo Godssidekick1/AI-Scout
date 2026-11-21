@@ -1,158 +1,73 @@
 """
 Player Comparison Engine
 ========================
-Uses ChromaDB vector embeddings to find players with similar statistical profiles.
+Finds players with similar statistical profiles by cosine similarity over a
+standardised per-90 feature vector. A pool of 10-20 players fits trivially in
+memory, so plain numpy replaces the vector database the first version used.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
+
 import numpy as np
 
-import chromadb
-from chromadb.config import Settings
+SIMILARITY_FEATURES = [
+    "goals_p90", "assists_p90", "xG_p90", "xA_p90", "npxG_p90",
+    "shots_p90", "key_passes_p90", "xGChain_p90", "xGBuildup_p90",
+    # legacy / optional fields, zero when absent
+    "xT_p90", "tackles_p90",
+]
+
+# Rough population spreads so one large-valued stat (shots) doesn't dominate small ones (xA).
+FEATURE_SCALE = {
+    "goals_p90": 0.3, "assists_p90": 0.2, "xG_p90": 0.3, "xA_p90": 0.15, "npxG_p90": 0.25,
+    "shots_p90": 1.5, "key_passes_p90": 1.0, "xGChain_p90": 0.3, "xGBuildup_p90": 0.2,
+    "xT_p90": 0.2, "tackles_p90": 1.0,
+}
+
+
+def stats_to_vector(stats: Dict) -> np.ndarray:
+    v = np.array([float(stats.get(f) or 0.0) / FEATURE_SCALE[f] for f in SIMILARITY_FEATURES])
+    norm = np.linalg.norm(v)
+    return v / norm if norm > 0 else v
+
+
+def cosine_similarity(a: Dict, b: Dict) -> float:
+    """0-100 similarity between two stat profiles."""
+    return round(float(np.dot(stats_to_vector(a), stats_to_vector(b))) * 100, 1)
 
 
 class PlayerComparisonEngine:
-    """
-    Finds players with similar playing styles using vector similarity.
-    Converts player stats into a 32-dimensional vector and uses
-    ChromaDB for fast cosine-similarity search.
-    """
-
     def __init__(self, collection_name: str = "player_vectors"):
-        self.client = chromadb.Client(Settings(
-            anonymized_telemetry=False,
-            allow_reset=True,
-        ))
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        self.collection_name = collection_name
+        self._ids: List[str] = []
+        self._meta: List[Dict] = []
+        self._vectors: List[np.ndarray] = []
 
-    def _stats_to_vector(self, stats: Dict) -> List[float]:
-        """
-        Convert player stats to a normalized 32-dimensional vector.
+    def add_player(self, player_id: str, name: str, stats: Dict, metadata: Optional[Dict] = None):
+        meta = {"name": name, "position": stats.get("position", ""), "team": stats.get("team", ""),
+                "league": stats.get("league", ""), **(metadata or {})}
+        vec = stats_to_vector(stats)
+        if player_id in self._ids:
+            i = self._ids.index(player_id)
+            self._meta[i], self._vectors[i] = meta, vec
+        else:
+            self._ids.append(player_id)
+            self._meta.append(meta)
+            self._vectors.append(vec)
 
-        The vector captures 4 dimensions of play:
-        - Attacking output (8 dims)
-        - Defensive contribution (8 dims)
-        - Ball progression (8 dims)
-        - Style indicators (8 dims)
-        """
-
-        def s(key, default=0.0):
-            return float(stats.get(key, default))
-
-        vector = [
-            # === Attacking (8 dims) ===
-            s("goals_p90"),
-            s("assists_p90"),
-            s("xG_p90"),
-            s("xA_p90"),
-            s("xT_p90"),
-            s("shot_creating_actions_p90"),
-            s("goals_p90") + s("assists_p90"),                    # G+A
-            s("goals_p90") / max(s("xG_p90"), 0.01),             # Finishing quality
-
-            # === Defensive (8 dims) ===
-            s("tackles_p90"),
-            s("interceptions_p90"),
-            s("pressing_success_pct") / 100,
-            s("defensive_duel_win_rate") / 100,
-            s("blocks_p90"),
-            s("tackles_p90") + s("interceptions_p90"),            # Total defensive actions
-            s("pressing_success_pct") / 100 * s("tackles_p90"),   # Pressing intensity
-            s("defensive_duel_win_rate") / 100 * s("tackles_p90"),
-
-            # === Progression (8 dims) ===
-            s("progressive_carries_p90"),
-            s("progressive_passes_p90"),
-            s("passes_into_penalty_area_p90"),
-            s("progressive_carries_distance") / 100,
-            s("pv_plus"),
-            (s("progressive_carries_p90") + s("progressive_passes_p90")) / 2,
-            s("passes_into_penalty_area_p90") / max(s("progressive_carries_p90"), 0.01),
-            s("high_intensity_sprints_p90") / 10,
-
-            # === Style indicators (8 dims) ===
-            1.0 if s("goals_p90") > s("assists_p90") else 0.0,   # Scorer vs creator
-            s("goals_p90") / max(s("goals_p90") + s("assists_p90"), 0.01),
-            s("tackles_p90") / max(s("tackles_p90") + s("interceptions_p90"), 0.01),
-            1.0 if s("progressive_carries_p90") > 5.0 else 0.0,  # Ball-carrier flag
-            1.0 if s("pressing_success_pct") > 30 else 0.0,      # Active presser
-            (s("goals_p90") + s("tackles_p90")) / 2,              # Attack-defense balance
-            s("xT_p90") / max(s("shot_creating_actions_p90"), 0.01),
-            s("high_intensity_sprints_p90") / max(s("progressive_carries_p90"), 0.01),
-        ]
-
-        # Normalize
-        magnitude = np.linalg.norm(vector)
-        if magnitude > 0:
-            vector = [v / magnitude for v in vector]
-
-        return vector[:32]
-
-    def add_player(self, player_id: str, name: str, stats: Dict, metadata: Dict = None):
-        """Add a player to the similarity database."""
-        vector = self._stats_to_vector(stats)
-        meta = {
-            "name": name,
-            "position": stats.get("position", ""),
-            "team": stats.get("team", ""),
-            "league": stats.get("league", ""),
-            "age": int(stats.get("age", 0)),
-        }
-        if metadata:
-            meta.update(metadata)
-
-        self.collection.upsert(
-            embeddings=[vector],
-            documents=[name],
-            metadatas=[meta],
-            ids=[player_id],
-        )
-
-    def find_similar(self, stats: Dict, n: int = 5, exclude_id: str = None) -> List[Dict]:
-        """
-        Find the most similar players to the given stat profile.
-
-        Returns:
-            List of dicts with name, position, team, similarity_score (0-100)
-        """
-        vector = self._stats_to_vector(stats)
-
-        results = self.collection.query(
-            query_embeddings=[vector],
-            n_results=n + (1 if exclude_id else 0),  # Fetch extra in case we need to exclude
-        )
-
-        similar = []
-        if results["ids"] and results["ids"][0]:
-            for i, pid in enumerate(results["ids"][0]):
-                if exclude_id and pid == exclude_id:
-                    continue
-
-                meta = results["metadatas"][0][i]
-                distance = results["distances"][0][i]
-                similarity = round((1 - distance) * 100, 1)
-
-                similar.append({
-                    "player_id": pid,
-                    "name": meta.get("name", ""),
-                    "position": meta.get("position", ""),
-                    "team": meta.get("team", ""),
-                    "league": meta.get("league", ""),
-                    "similarity_score": similarity,
-                })
-
-        return similar[:n]
+    def find_similar(self, stats: Dict, n: int = 5, exclude_id: Optional[str] = None) -> List[Dict]:
+        if not self._ids:
+            return []
+        sims = np.stack(self._vectors) @ stats_to_vector(stats)
+        out = []
+        for i in np.argsort(-sims):
+            if self._ids[i] == exclude_id:
+                continue
+            out.append({"player_id": self._ids[i], **self._meta[i],
+                        "similarity_score": round(float(sims[i]) * 100, 1)})
+            if len(out) == n:
+                break
+        return out
 
     def reset(self):
-        """Clear all player data."""
-        try:
-            self.client.delete_collection(self.collection.name)
-        except Exception:
-            pass
-        self.collection = self.client.get_or_create_collection(
-            name=self.collection.name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        self._ids, self._meta, self._vectors = [], [], []
