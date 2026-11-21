@@ -16,7 +16,7 @@ import logging
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,16 @@ from forecast.roles import ROLES, RoleProfile, metric_scales, role_scores, style
 from forecast.table import expected_share, team_totals
 
 logger = logging.getLogger(__name__)
+
+
+_FOLD = str.maketrans({"ø": "o", "æ": "ae", "ß": "ss", "ı": "i", "ł": "l", "đ": "d", "-": " ", "'": ""})
+
+
+def _plain(text: str) -> str:
+    """Lower case, accents removed: 'Ødegaard' -> 'odegaard'."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(text).lower().translate(_FOLD))
+    return "".join(c for c in t if not unicodedata.combining(c)).strip()
 
 
 def artifact_path() -> Path:
@@ -75,11 +85,23 @@ class ForecastService:
         return self.ps.sort_values("season").groupby("us_id").tail(1)
 
     def find(self, name: str, team: Optional[str] = None) -> Optional[pd.Series]:
+        """A player by name. Full names match fuzzily; a surname or part of a name ("Saka",
+        "Odegaard") matches players whose name contains every typed word, preferring his
+        club if given, then the most recent season and most minutes."""
         from data_sources.understat_source import best_match
         cur = self.current()
         rows = [{"name": n, "team": t, "us_id": i} for n, t, i in zip(cur["name"], cur["team"], cur["us_id"])]
         hit = best_match(name, rows, team)
-        return cur[cur["us_id"] == hit["us_id"]].iloc[0] if hit else None
+        if hit:
+            return cur[cur["us_id"] == hit["us_id"]].iloc[0]
+        words = set(_plain(name).split())
+        if not words:
+            return None
+        sub = cur[[words <= set(_plain(n).split()) for n in cur["name"]]]
+        if team and not sub.empty:
+            at = sub[[_plain(team) in _plain(t) for t in sub["team"]]]
+            sub = at if not at.empty else sub
+        return sub.sort_values(["season", "minutes"]).iloc[-1] if not sub.empty else None
 
     def _team_row(self, team: str) -> Optional[pd.Series]:
         tt = self.in_latest_season(team_totals(self.ps).reset_index())
@@ -114,10 +136,11 @@ class ForecastService:
         scales = metric_scales(self.in_latest_season(self.ps))
         return np.vstack([style_vector({m: r[f"{m}_p90"] for m in METRICS}, scales) for _, r in rows.iterrows()])
 
-    def _retrieve(self, cur: pd.DataFrame, role: RoleProfile, k: int) -> pd.DataFrame:
-        """Nearest styles to the role: ChromaDB when enabled and available, numpy otherwise.
-        Filters that ChromaDB cannot see (age, value, exclusions) are already applied to `cur`."""
-        tv = target_vector(role)
+    def _retrieve(self, cur: pd.DataFrame, role: RoleProfile, k: int, target: Optional[np.ndarray] = None) -> pd.DataFrame:
+        """Nearest styles to the role (or to `target`, e.g. a named player's style vector): ChromaDB
+        when enabled and available, numpy otherwise. Filters that ChromaDB cannot see (age, value,
+        exclusions) are already applied to `cur`."""
+        tv = target_vector(role) if target is None else target
         if settings.ENABLE_VECTOR_INDEX:
             try:
                 from forecast.index import StyleIndex
@@ -153,12 +176,15 @@ class ForecastService:
         out["market_value_eur"] = out["us_id"].map(self.values)
         return out
 
-    def candidates(self, role_key: str, n: int = 25, to_team: Optional[str] = None, max_age: Optional[float] = None,
-                   max_value_eur: Optional[float] = None, min_minutes: int = 600,
-                   leagues: Optional[Iterable[str]] = None, exclude: Iterable[str] = ()) -> pd.DataFrame:
-        """Closest players to the role's style, projected to `to_team`, ranked by role score.
+    def candidates(self, role_key: Union[str, RoleProfile], n: int = 25, to_team: Optional[str] = None,
+                   max_age: Optional[float] = None, max_value_eur: Optional[float] = None, min_minutes: int = 600,
+                   leagues: Optional[Iterable[str]] = None, exclude: Iterable[str] = (),
+                   min_age: Optional[float] = None, exclude_ids: Iterable[str] = (),
+                   target: Optional[np.ndarray] = None) -> pd.DataFrame:
+        """Closest players to the role's style (or to `target`), projected to `to_team`, ranked by
+        role score. `role_key` is a key of ROLES or a custom RoleProfile (see forecast.brief).
         Adds `value_gap`: how cheap the player looks for his projected output."""
-        role: RoleProfile = ROLES[role_key]
+        role: RoleProfile = ROLES[role_key] if isinstance(role_key, str) else role_key
         cur = self.current()
         cur = self.in_latest_season(cur)
         cur = cur[cur["group"].isin(role.groups) & (cur["minutes"] >= min_minutes)]
@@ -166,6 +192,9 @@ class ForecastService:
             cur = cur[cur["league"].isin(list(leagues))]
         if max_age is not None:
             cur = cur[cur["age"].isna() | (cur["age"] <= max_age)]
+        if min_age is not None:
+            cur = cur[cur["age"].isna() | (cur["age"] >= min_age)]
+        cur = cur[~cur["us_id"].isin(set(exclude_ids))]
         excl = {e.lower() for e in exclude}
         cur = cur[~cur["name"].str.lower().isin(excl)]
         if max_value_eur is not None:
@@ -174,7 +203,7 @@ class ForecastService:
         if cur.empty:
             return pd.DataFrame()
 
-        pool = self._retrieve(cur, role, max(n * 2, 40))
+        pool = self._retrieve(cur, role, max(n * 2, 40), target)
         if pool.empty:
             return pd.DataFrame()
 

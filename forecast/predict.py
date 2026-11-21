@@ -3,6 +3,10 @@ Try the forecast model yourself
 ===============================
 Works from the model that `python -m forecast.build` saved; no API keys needed.
 
+    python -m forecast.predict                # asks: player to replace? what are you looking for?
+    python -m forecast.predict find --replace "Rodri" "younger, progressive passer, under 30m"
+    python -m forecast.predict find "replace Rodri, younger, under 30m, outside the Premier League"
+    python -m forecast.predict find "creative winger under 23 for Arsenal, hidden gems"
     python -m forecast.predict player "Bukayo Saka"
     python -m forecast.predict player "Bukayo Saka" --to "Real Madrid"
     python -m forecast.predict player "Ollie Watkins" --to "Bayern Munich" --age 33 --minutes 1500
@@ -162,6 +166,102 @@ def cmd_role(service: ForecastService, args) -> None:
           f"python -m forecast.predict player \"{df.iloc[0]['name']}\"" + (f" --to \"{args.to}\"" if args.to else ""))
 
 
+LEAGUE_SHORT = {"premier_league": "EPL", "la_liga": "LaLiga", "bundesliga": "Bund", "serie_a": "SerieA", "ligue_1": "L1"}
+UNMEASURED_WORDS = {"tackl": "tackling", "intercept": "interceptions", "aerial": "aerials", "header": "heading",
+                    "defensive": "defending", "defending": "defending", "duel": "duels", "pace": "pace",
+                    "fast": "pace", "quick": "pace", "physical": "physicality", "tall": "height", "in the air": "aerials",
+                    "pressing": "pressing", "work rate": "work rate", "saves": "shot-stopping",
+                    "shot-stopp": "shot-stopping", "keeper": "goalkeeping"}
+
+
+def run_brief(service: ForecastService, text: str, replace: Optional[str] = None, n: int = 10,
+              overrides: Optional[dict] = None, exclude=()) -> None:
+    """Parse a brief, apply any explicit overrides, print what was understood and the shortlist."""
+    from forecast import brief as briefs
+    b = briefs.parse(text, service, replace=replace)
+    for k, v in (overrides or {}).items():
+        if v is not None:
+            setattr(b, k, v)
+    if (overrides or {}).get("to_team"):
+        b.to_team = resolve_club(service, overrides["to_team"])["team"]
+
+    print("Understood: " + " | ".join(b.describe()))
+    if b.unmeasured:
+        words = sorted({UNMEASURED_WORDS.get(u, u) for u in b.unmeasured})
+        print(f"Not in the free data, so not used: {', '.join(words)} (needs event data)")
+    try:
+        df, him, prof = briefs.search(b, service, n=n, exclude=exclude)
+    except ValueError as e:
+        print(f"\n{e}")
+        return
+    print("Ranking on: " + ", ".join(f"{m} {w:.0%}" for m, w in sorted(prof.weights.items(), key=lambda x: -x[1]))
+          + (f"  ({prof.note})" if prof.note else ""))
+    if df.empty:
+        print("\nNo players pass these filters. Loosen the age, value, league or minutes limits.")
+        return
+
+    shown = [m for m, _ in sorted(prof.weights.items(), key=lambda x: -x[1])][:3]
+    score_col = "vs him" if him is not None else "score"
+    head = (f"{'#':>3}  {'player':<23}{'club':<19}{'lg':<7}{'age':>4}{'min':>6}{'style':>6}{score_col:>7}"
+            f"{'gap':>6}{'EUR M':>7}" + "".join(f"{m[:9]:>10}" for m in shown))
+    print("\n" + head)
+    print("-" * len(head))
+
+    def line(i, r, score):
+        age = f"{r['age']:.0f}" if pd.notna(r["age"]) else "?"
+        val = f"{r['market_value_eur'] / 1e6:.1f}" if pd.notna(r["market_value_eur"]) else "?"
+        gap = f"{r['value_gap']:+.1f}" if pd.notna(r.get("value_gap", np.nan)) else ""
+        sty = f"{r['style_similarity']:.0f}" if pd.notna(r.get("style_similarity", np.nan)) else ""
+        return (f"{i:>3}  {str(r['name'])[:22]:<23}{str(r['team'])[:18]:<19}{LEAGUE_SHORT.get(r['league'], r['league'])[:6]:<7}"
+                f"{age:>4}{r['minutes']:>6.0f}{sty:>6}{score:>7}{gap:>6}{val:>7}"
+                + "".join(f"{r[f'pred_{m}']:>10.2f}" for m in shown))
+
+    if him is not None:
+        print(line("him", him, "0.00"))
+    for i, r in df.iterrows():
+        score = r["role_score"] - him["role_score"] if him is not None else r["role_score"]
+        print(line(i + 1, r, f"{score:+.2f}" if him is not None else f"{score:.2f}"))
+    at = f" at {b.to_team}" if b.to_team else ""
+    print(f"\nstyle = how alike the shape of their output is (100 = identical). "
+          + ("vs him = projected output in this profile next season" + at + ", minus his (0 = as good as him), "
+             if him is not None else "score = projected output in this profile next season" + at
+             + " (0 = average in the role), ")
+          + "in standard deviations. gap = value gap: positive = cheap for that output. "
+            "Metric columns are projected per-90 next season.\n"
+          f"Drill into one:  python -m forecast.predict player \"{df.iloc[0]['name']}\""
+          + (f" --to \"{b.to_team}\"" if b.to_team else ""))
+
+
+def cmd_find(service: ForecastService, args) -> None:
+    text = " ".join(args.brief or [])
+    if not text and not args.replace:
+        sys.exit("Give a player to replace (--replace) and/or a description, e.g.\n"
+                 '  python -m forecast.predict find --replace "Rodri" "younger, progressive passer, under 30m"')
+    run_brief(service, text, replace=args.replace, n=args.n, exclude=args.exclude or (),
+              overrides={"to_team": args.to, "max_age": args.max_age, "min_age": args.min_age,
+                         "max_value_eur": args.max_value * 1e6 if args.max_value else None,
+                         "leagues": args.leagues, "min_minutes": args.min_minutes,
+                         "sort": "value" if args.hidden else None})
+
+
+def interactive(service: ForecastService) -> None:
+    print("AI Scout: describe who you're looking for. Press Enter to skip a question, Ctrl+C to quit.\n"
+          "Examples:  Rodri  /  younger, progressive passer, under 30m, outside the Premier League\n"
+          "           (no player)  /  creative winger under 23 for Arsenal, hidden gems\n")
+    while True:
+        try:
+            replace = input("Player to replace: ").strip() or None
+            text = input("What you're looking for: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not replace and not text:
+            return
+        print()
+        run_brief(service, text, replace=replace)
+        print("\n" + "=" * 60 + "\n")
+
+
 def cmd_roles(service: ForecastService, args) -> None:
     for r in ROLES.values():
         flag = "  (proxy)" if r.proxy else ""
@@ -183,7 +283,20 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m forecast.predict", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", help="path to a saved model (default: the one forecast.build wrote)")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")
+
+    f = sub.add_parser("find", help="shortlist from a player to replace and/or a description")
+    f.add_argument("brief", nargs="*", help="what you're looking for, e.g. 'younger, progressive passer, under 30m'")
+    f.add_argument("--replace", help="the player you want to replace")
+    f.add_argument("--to", help="club to project at (default: the replaced player's club)")
+    f.add_argument("--max-age", type=float)
+    f.add_argument("--min-age", type=float)
+    f.add_argument("--max-value", type=float, help="EUR millions")
+    f.add_argument("--leagues", nargs="+", metavar="LEAGUE", help=" ".join(LEAGUES))
+    f.add_argument("--min-minutes", type=int)
+    f.add_argument("--hidden", action="store_true", help="sort by value gap (cheap for the projected output)")
+    f.add_argument("--exclude", nargs="+", metavar="NAME")
+    f.add_argument("-n", type=int, default=10)
 
     p = sub.add_parser("player", help="project one player, optionally at another club")
     p.add_argument("name")
@@ -210,7 +323,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")      # accented names on a Windows console
     service = load(args.model)
-    {"player": cmd_player, "role": cmd_role, "roles": cmd_roles, "clubs": cmd_clubs}[args.cmd](service, args)
+    if args.cmd is None:
+        interactive(service)
+        return
+    {"find": cmd_find, "player": cmd_player, "role": cmd_role, "roles": cmd_roles,
+     "clubs": cmd_clubs}[args.cmd](service, args)
 
 
 if __name__ == "__main__":

@@ -356,3 +356,59 @@ def test_a_league_missing_its_latest_season_stays_searchable(service, monkeypatc
     assert gappy._team_row(club) is not None
     df = gappy.candidates("poacher", n=200, min_minutes=0, leagues=["bundesliga"])
     assert not df.empty
+
+
+# ── briefs (offline parser) ────────────────────────────────────
+
+def _named(service, group):
+    cur = service.in_latest_season(service.current())
+    return cur[(cur["group"] == group) & (cur["minutes"] >= 900) & (cur["age"] >= 24)].iloc[0]
+
+
+def test_brief_parses_player_money_age_leagues_and_emphasis(service):
+    from forecast import brief
+    p = _named(service, "CM")
+    b = brief.parse(f"replace {p['name']}, younger, progressive passer, under 30m, outside the Premier League, "
+                    "good in the air", service)
+    assert b.replace["us_id"] == p["us_id"] and b.to_team == p["team"]
+    assert b.max_value_eur == 30e6 and b.max_age == p["age"] - 1          # 30m is money, not an age
+    assert "premier_league" not in b.leagues and len(b.leagues) == 4
+    assert b.emphasis["xGBuildup"] == 2.0 and "in the air" in b.unmeasured
+
+    b = brief.parse("creative winger u21 from serie a, hidden gems, budget EUR 5m", service)
+    assert (b.role, b.max_age, b.leagues, b.sort, b.max_value_eur) == ("creative_winger", 21, ["serie_a"], "value", 5e6)
+    club = service.in_latest_season(service.ps)["team"].iloc[0]
+    assert brief.parse(f"striker under 25 for {club}", service).to_team == club
+
+
+def test_brief_search_matches_the_replaced_players_style_and_excludes_him(service, monkeypatch):
+    from forecast import brief
+    monkeypatch.setattr(settings, "ENABLE_VECTOR_INDEX", False)
+    p = _named(service, "ST")
+    df, him, prof = brief.search(brief.parse("", service, replace=p["name"]), service, n=5)
+    assert len(df) == 5 and p["us_id"] not in set(df["us_id"]) and set(df["group"]) == {"ST"}
+    assert him["us_id"] == p["us_id"] and abs(sum(prof.weights.values()) - 1) < 0.02
+    assert df["role_score"].is_monotonic_decreasing
+    with pytest.raises(ValueError):
+        brief.search(brief.parse("someone good", service), service)
+
+
+def test_find_by_surname(service):
+    p = _named(service, "AM")
+    surname = p["name"].split()[-1]
+    assert service.find(surname) is not None
+    assert service.find("Nobody Atall") is None
+
+
+def test_predict_find_and_interactive(service, tmp_path, capsys, monkeypatch):
+    from forecast import predict
+    monkeypatch.setattr(settings, "ENABLE_VECTOR_INDEX", False)
+    path = service.save(tmp_path / "svc.pkl")
+    p = _named(service, "CB")
+    predict.main(["--model", str(path), "find", "--replace", p["name"], "better", "passer", "-n", "3"])
+    out = capsys.readouterr().out
+    assert f"replacing {p['name']}" in out and "vs him" in out and "him " in out
+    answers = iter([p["name"], "under 40m", ""])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers, ""))
+    predict.main(["--model", str(path)])
+    assert "value <= EUR 40M" in capsys.readouterr().out

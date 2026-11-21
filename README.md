@@ -99,6 +99,10 @@ The agent loads the saved model automatically. Without it, the pipeline runs exa
 **Try it yourself** with your own inputs, straight from the saved model (no API keys):
 
 ```bash
+python -m forecast.predict                                            # asks: who to replace? what are you looking for?
+python -m forecast.predict find --replace "Rodri" "younger, progressive passer, under 30m"
+python -m forecast.predict find "replace Saka, under 23, outside the Premier League, hidden gems"
+python -m forecast.predict find "creative winger u21 from serie a, budget 15m"
 python -m forecast.predict player "Bukayo Saka"                       # next season if he stays
 python -m forecast.predict player "Bukayo Saka" --to "Real Madrid"    # ...if he moves
 python -m forecast.predict player "Ollie Watkins" --age 33 --minutes 1500   # what-if age and minutes
@@ -107,7 +111,7 @@ python -m forecast.predict roles      # role profiles
 python -m forecast.predict clubs      # clubs you can move a player to, strongest first
 ```
 
-`player` prints last season, his estimated ability, next season's projection with an 80% range, and how much each term (league tax, team strength, usage, age, trend) moves it. `role` ranks players for a role with their value gap; `--exclude` drops the obvious names.
+`find` takes a player to replace, a description, or both, parsed offline (`forecast/brief.py`) and printed back so you can see what it understood. The named player sets the style to match and the club to project at; the description adds a role, emphasis ("progressive", "creative", "goalscorer"), age, value, league and minutes filters, and "hidden"/"bargain" sorts by value gap. Asks the free data cannot answer (aerials, tackling, pace) are flagged, not silently ignored. `player` prints last season, his estimated ability, next season's projection with an 80% range, and how much each term (league tax, team strength, usage, age, trend) moves it. `role` ranks players for a role with their value gap; `--exclude` drops the obvious names.
 
 Data: Understat (xG family), [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets) (CC0: ages, positions, values, transfers), ClubElo (team strength). Design rationale and the research behind each term are in the project's design doc.
 
@@ -219,6 +223,7 @@ forecast/
   service.py                what the agent calls: candidates() and project()
   build.py                  CLI: data -> backtest -> fit -> saved model
   predict.py                CLI: try the saved model (project a player, rank a role)
+  brief.py                  offline brief parser: player to replace + description -> filters and profile
   synthetic.py              generated history with known answers (tests, offline demo)
 evals/                      golden queries + eval runner
 tests/                      offline tests with fixtures and fake Gemini
