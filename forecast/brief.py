@@ -88,7 +88,9 @@ class Brief:
     min_goals: Optional[float] = None         # projected non-penalty xG over expected minutes
     min_assists: Optional[float] = None       # projected xA over expected minutes
     sort: str = "fit"
-    note: str = ""                          # "fit" (projected output in the profile) or "value" (value gap)
+    note: str = ""
+    parser: str = "rules"
+    interpretation: str = ""                          # "fit" (projected output in the profile) or "value" (value gap)
     unmeasured: List[str] = field(default_factory=list)
 
     def describe(self) -> List[str]:
@@ -230,6 +232,82 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     b.unmeasured = sorted({c for c in UNMEASURED if _has(t, c)})
     if any(_has(t, c) for c in HIDDEN):
         b.sort = "value"
+    return b
+
+
+EMPHASIS_KEYS = {"build_up": "build-up / progression", "chance_creation": "chance creation",
+                 "goal_threat": "goal threat", "shooting": "shooting volume", "involvement": "involvement"}
+
+LLM_PROMPT = """You turn a football scout's request into search filters for a model of the big five leagues.
+The model measures only six per-90 stats: npxG, xA, shots, key passes, xGChain, xGBuildup. Anything else the
+scout asks for (defending, aerials, pace, work rate, versatility, character...) goes in `unmeasured`.
+Fill only what the request states or clearly implies; leave the rest empty. Never invent a budget, age or club."""
+
+
+def understand(text: str, service, replace: Optional[str] = None) -> Brief:
+    """Read a brief in any wording with Gemini when a key is set; the rule parser otherwise,
+    or if the call fails. The result says which parser read it."""
+    from config import settings
+    if settings.has_gemini() and (text or "").strip():
+        try:
+            return from_llm(text, service, replace)
+        except Exception as e:  # noqa: BLE001 - fall back to rules, say so
+            b = parse(text, service, replace=replace)
+            b.parser = f"rules (Gemini failed: {str(e)[:80]})"
+            return b
+    return parse(text, service, replace=replace)
+
+
+def from_llm(text: str, service, replace: Optional[str] = None) -> Brief:
+    import asyncio
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from core import llm
+    from models.llm_schemas import BriefSpec
+    msg = text if not replace else f"Player to replace: {replace}\nRequest: {text}"
+    spec = asyncio.run(llm.structured(BriefSpec, [SystemMessage(content=LLM_PROMPT), HumanMessage(content=msg)],
+                                      name="forecast.brief", temperature=0.0))
+    return from_spec(spec, service, text, replace)
+
+
+def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> Brief:
+    """Check an LLM reading against the data: the player and club must exist, roles and
+    leagues come from fixed lists, and an age 'younger than him' is computed here."""
+    b = Brief(text=text, parser="Gemini", interpretation=spec.interpretation)
+    name = replace or spec.replace_player
+    if name:
+        hit = service.find(name)
+        if hit is None:
+            b.replace_query = name
+        else:
+            b.replace = hit
+    if spec.target_club:
+        row = service._team_row(spec.target_club)
+        club = row["team"] if row is not None else find_club(spec.target_club, service, require_preposition=False)
+        b.to_team = club
+    if b.to_team is None and b.replace is not None:
+        b.to_team = b.replace["team"]
+    b.role = spec.role
+    for key in spec.emphasis:
+        label = EMPHASIS_KEYS[key]
+        b.emphasis_labels.append(label)
+        for lbl, _, mult in EMPHASIS:
+            if lbl == label:
+                for k, v in mult.items():
+                    b.emphasis[k] = max(b.emphasis.get(k, 1.0), v)
+    b.min_age = float(spec.min_age) if spec.min_age else None
+    b.max_age = float(spec.max_age) if spec.max_age else None
+    if spec.younger_than_replaced and b.max_age is None and b.replace is not None and pd.notna(b.replace.get("age")):
+        b.max_age = float(b.replace["age"]) - 1
+    b.max_value_eur = spec.max_value_eur_m * 1e6 if spec.max_value_eur_m else None
+    if spec.include_leagues:
+        b.leagues = [lg for lg in spec.include_leagues if lg not in spec.exclude_leagues]
+    elif spec.exclude_leagues:
+        b.leagues = [lg for lg in LEAGUES if lg not in spec.exclude_leagues]
+    if spec.min_minutes:
+        b.min_minutes = int(spec.min_minutes)
+    b.min_goals, b.min_assists = spec.min_goals, spec.min_assists
+    b.sort = "value" if spec.hidden_talent else "fit"
+    b.unmeasured = list(dict.fromkeys(u.strip().lower() for u in spec.unmeasured if u.strip()))
     return b
 
 

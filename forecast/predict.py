@@ -3,7 +3,7 @@ Try the forecast model yourself
 ===============================
 Works from the model that `python -m forecast.build` saved; no API keys needed.
 
-    python -m forecast.predict                # asks: player to replace? what are you looking for?
+    python -m forecast.predict                # type requests in plain English (Gemini if GOOGLE_API_KEY is set)
     python -m forecast.predict find --replace "Rodri" "younger, progressive passer, under 30m"
     python -m forecast.predict find "replace Rodri, younger, under 30m, outside the Premier League"
     python -m forecast.predict find "creative winger under 23 for Arsenal, hidden gems"
@@ -185,13 +185,17 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
               overrides: Optional[dict] = None, exclude=()) -> None:
     """Parse a brief, apply any explicit overrides, print what was understood and the shortlist."""
     from forecast import brief as briefs
-    b = briefs.parse(text, service, replace=replace)
+    b = briefs.understand(text, service, replace=replace)
     for k, v in (overrides or {}).items():
         if v is not None:
             setattr(b, k, v)
     if (overrides or {}).get("to_team"):
         b.to_team = resolve_club(service, overrides["to_team"])["team"]
 
+    if b.interpretation:
+        print(f"Reading ({b.parser}): {b.interpretation}")
+    elif not b.parser.startswith("rules") or "failed" in b.parser:
+        print(f"Reading: {b.parser}")
     print("Understood: " + " | ".join(b.describe()))
     if b.unmeasured:
         words = sorted({UNMEASURED_WORDS.get(u, u) for u in b.unmeasured})
@@ -259,21 +263,25 @@ def cmd_find(service: ForecastService, args) -> None:
 
 
 def interactive(service: ForecastService) -> None:
-    print("AI Scout: describe who you're looking for. Press Enter to skip a question, Ctrl+C to quit.\n"
-          "Examples:  Rodri  /  younger, progressive passer, under 30m, outside the Premier League\n"
-          "           (no player)  /  creative winger under 23 for Arsenal, hidden gems\n")
+    from config import settings
+    mode = ("Gemini reads your request" if settings.has_gemini()
+            else "no GOOGLE_API_KEY, so a rule-based reader is used: name a player as 'replace X' or 'like X'")
+    print(f"AI Scout: describe the player you want in your own words ({mode}).\n"
+          "Examples:  a cb for Chelsea to replace Fofana, good on the ball, under 26, max 40m\n"
+          "           goalscoring winger aged 25-30 who can score 15 goals, not from the Premier League\n"
+          "           hidden gems: creative midfielders under 23 in Ligue 1\n"
+          "Press Enter on an empty line or Ctrl+C to quit.\n")
     while True:
         try:
-            replace = input("Player to replace: ").strip() or None
-            text = input("What you're looking for: ").strip()
+            text = input("Scout> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        if not replace and not text:
+        if not text:
             return
         print()
         try:
-            run_brief(service, text, replace=replace)
+            run_brief(service, text)
         except KeyboardInterrupt:
             print("\n(stopped)")
         except Exception:  # noqa: BLE001 - keep the prompt alive, show what broke

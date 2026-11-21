@@ -99,7 +99,7 @@ The agent loads the saved model automatically. Without it, the pipeline runs exa
 **Try it yourself** with your own inputs, straight from the saved model (no API keys):
 
 ```bash
-python -m forecast.predict                                            # asks: who to replace? what are you looking for?
+python -m forecast.predict                                            # type requests in plain English
 python -m forecast.predict find --replace "Rodri" "younger, progressive passer, under 30m"
 python -m forecast.predict find "replace Saka, under 23, outside the Premier League, hidden gems"
 python -m forecast.predict find "creative winger u21 from serie a, budget 15m"
@@ -111,7 +111,7 @@ python -m forecast.predict roles      # role profiles
 python -m forecast.predict clubs      # clubs you can move a player to, strongest first
 ```
 
-`find` takes a player to replace, a description, or both, parsed offline (`forecast/brief.py`) and printed back so you can see what it understood. The named player sets the style to match and the club to project at; the description adds a role, emphasis ("progressive", "creative", "goalscorer"), age, value, league and minutes filters, and "hidden"/"bargain" sorts by value gap. Asks the free data cannot answer (aerials, tackling, pace) are flagged, not silently ignored. `player` prints last season, his estimated ability, next season's projection with an 80% range, and how much each term (league tax, team strength, usage, age, trend) moves it. `role` ranks players for a role with their value gap; `--exclude` drops the obvious names.
+With `GOOGLE_API_KEY` in `.env`, Gemini reads the request into a typed `BriefSpec` (any wording), and the result is checked against the data: the player and club must exist, roles and leagues come from fixed lists. Without a key, or if the call fails, a rule-based reader takes over. `find` takes a player to replace, a description, or both, parsed by `forecast/brief.py` and printed back so you can see what it understood. The named player sets the style to match and the club to project at; the description adds a role, emphasis ("progressive", "creative", "goalscorer"), age, value, league and minutes filters, and "hidden"/"bargain" sorts by value gap. Asks the free data cannot answer (aerials, tackling, pace) are flagged, not silently ignored. `player` prints last season, his estimated ability, next season's projection with an 80% range, and how much each term (league tax, team strength, usage, age, trend) moves it. `role` ranks players for a role with their value gap; `--exclude` drops the obvious names.
 
 Data: Understat (xG family), [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets) (CC0: ages, positions, values, transfers), ClubElo (team strength). Design rationale and the research behind each term are in the project's design doc.
 

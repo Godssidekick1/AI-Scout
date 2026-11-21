@@ -408,7 +408,7 @@ def test_predict_find_and_interactive(service, tmp_path, capsys, monkeypatch):
     predict.main(["--model", str(path), "find", "--replace", p["name"], "better", "passer", "-n", "3"])
     out = capsys.readouterr().out
     assert f"replacing {p['name']}" in out and "vs him" in out and "him " in out
-    answers = iter([p["name"], "under 40m", ""])
+    answers = iter([f"replace {p['name']}, under 40m", ""])
     monkeypatch.setattr("builtins.input", lambda _: next(answers, ""))
     predict.main(["--model", str(path)])
     assert "value <= EUR 40M" in capsys.readouterr().out
@@ -430,3 +430,36 @@ def test_brief_reads_age_ranges_goal_targets_and_flags_soft_asks(service, monkey
     b.min_goals, b.min_age, b.max_age = 99, None, None
     df, him, _ = brief.search(b, service, n=5)
     assert len(df) == 5 and b.note and df["proj_goals"].is_monotonic_decreasing and "proj_goals" in him
+
+
+
+def test_llm_brief_is_checked_against_the_data(service, monkeypatch):
+    """Gemini's reading becomes a Brief: player and club resolved in the data, 'younger' computed."""
+    from core import llm
+    from forecast import brief
+    from models.llm_schemas import BriefSpec
+    monkeypatch.setattr(settings, "ENABLE_VECTOR_INDEX", False)
+    monkeypatch.setattr(settings, "GOOGLE_API_KEY", "test-key")
+    p = _named(service, "CB")
+    club = service.in_latest_season(service.ps)["team"].iloc[0]
+    spec = BriefSpec(interpretation="A younger ball-playing CB like him for the club.", replace_player=p["name"],
+                     target_club=club.upper(), role="ball_playing_cb", emphasis=["build_up"],
+                     younger_than_replaced=True, max_value_eur_m=40, exclude_leagues=["premier_league"],
+                     min_minutes=1800, unmeasured=["Defending", "versatility"])
+    seen = {}
+
+    async def fake(schema, messages, *, name, model=None, temperature=0.2):
+        seen["text"] = messages[-1].content
+        return spec
+    monkeypatch.setattr(llm, "structured", fake)
+    b = brief.understand("a cb for them who is good on the ball, reliable, adaptable, under 40m", service)
+    assert b.parser == "Gemini" and b.replace["us_id"] == p["us_id"] and b.to_team == club
+    assert b.max_age == p["age"] - 1 and b.max_value_eur == 40e6 and "premier_league" not in b.leagues
+    assert b.emphasis["xGBuildup"] == 2.0 and b.unmeasured == ["defending", "versatility"]
+    df, him, _ = brief.search(b, service, n=3)
+    assert him is not None
+
+    async def broken(*a, **k):
+        raise llm.LLMError("quota")
+    monkeypatch.setattr(llm, "structured", broken)
+    assert brief.understand("striker under 25", service).parser.startswith("rules (Gemini failed")

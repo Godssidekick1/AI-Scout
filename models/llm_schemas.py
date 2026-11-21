@@ -34,6 +34,45 @@ class SearchConstraints(BaseModel):
                                        "('for Man City'). Null if not stated.")
 
 
+EmphasisKey = Literal["build_up", "chance_creation", "goal_threat", "shooting", "involvement"]
+
+
+class BriefSpec(BaseModel):
+    """A scout's free-text brief, read into the forecast model's filters (forecast.brief)."""
+
+    interpretation: str = Field(description="One plain sentence restating what the user is asking for.")
+    replace_player: Optional[str] = Field(default=None, description="Player the user wants to replace or find someone "
+                                          "like, as named ('Fofana', 'Rodri'). Null if none.")
+    target_club: Optional[str] = Field(default=None, description="Club the player would join ('for Chelsea', 'my team "
+                                       "is Arsenal'). Null if not stated.")
+    role: Optional[RoleKey] = Field(default=None, description="Closest role profile. A goalscoring or inside winger is "
+                                    "inside_forward; a creative/crossing winger is creative_winger; a ball-playing or "
+                                    "Stones-type centre-back is ball_playing_cb; a holding/deep passer is deep_playmaker.")
+    emphasis: List[EmphasisKey] = Field(default_factory=list, description="Measurable qualities stressed: build_up "
+                                        "(progressive passing, on the ball, distribution), chance_creation (creative, "
+                                        "assists, key passes), goal_threat (goals, finishing), shooting (shot volume), "
+                                        "involvement (link-up, combination play).")
+    min_age: Optional[int] = Field(default=None, description="Minimum age in years. 'between 25-30' means 25.")
+    max_age: Optional[int] = Field(default=None, description="Maximum age in years. 'under 25' means 24, 'u21' means 21.")
+    younger_than_replaced: bool = Field(default=False, description="True when the user wants someone younger than the "
+                                        "replaced player without giving an age.")
+    max_value_eur_m: Optional[float] = Field(default=None, description="Maximum market value or budget in millions of "
+                                             "euros (treat pounds as euros). Null if not stated.")
+    include_leagues: List[LeagueKey] = Field(default_factory=list, description="Only these leagues ('from Serie A'). "
+                                             "Empty means no restriction.")
+    exclude_leagues: List[LeagueKey] = Field(default_factory=list, description="Leagues to leave out ('outside the "
+                                             "Premier League').")
+    min_minutes: Optional[int] = Field(default=None, description="Minimum league minutes last season: 1800 for "
+                                       "'reliable', 'regular starter', 'proven'; 450 for a squad or rotation player.")
+    min_goals: Optional[float] = Field(default=None, description="League goals per season the user requires ('15+ goals').")
+    min_assists: Optional[float] = Field(default=None, description="League assists per season the user requires.")
+    hidden_talent: bool = Field(default=False, description="True for hidden, unknown, undervalued, bargain or "
+                                "'not the obvious names' requests.")
+    unmeasured: List[str] = Field(default_factory=list, description="Asks the six stats cannot measure, as short "
+                                  "phrases: defending, tackling, aerials, pace, tracking back, work rate, versatility, "
+                                  "leadership, physicality, goalkeeping, character.")
+
+
 class CharacterAnalysis(BaseModel):
     """What news coverage says about a player's character."""
 
