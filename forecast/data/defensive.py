@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 TOTALS: Tuple[str, ...] = ("tackles", "tackles_won", "interceptions", "blocks", "clearances", "aerials_won",
                            "aerials_lost", "recoveries", "duels_won", "duels_lost", "prog_passes", "prog_carries")
 COLUMNS = ["source", "league", "season", "src_id", "name", "team", "birth_year", "minutes", *TOTALS]
-PRIOR_MINUTES = 900.0      # shrinkage weight toward the position mean when a player has little data
+PRIOR_MINUTES = 900.0
+MAX_LOOKBACK = 5           # seasons back a defensive profile may reach      # shrinkage weight toward the position mean when a player has little data
 
 
 # ── polite HTTP with a disk cache ──────────────────────────────
@@ -282,8 +283,8 @@ def derived_totals(df: pd.DataFrame) -> Dict[str, np.ndarray]:
 
 
 def recent_rates(ps: pd.DataFrame, latest: pd.DataFrame, seasons_back: int = 2) -> pd.DataFrame:
-    """Each latest-season player's defensive profile: minutes-weighted over his last
-    `seasons_back` covered seasons, shrunk toward his position group's mean so 300 good
+    """Each latest-season player's defensive profile: minutes-weighted over his most recent
+    `seasons_back` covered seasons (within the last MAX_LOOKBACK), shrunk toward his position group's mean so 300 good
     minutes don't top a list. Returns one row per us_id with `def_{metric}` columns and
     `def_minutes_used` (0 = no defensive data; his values are then the group mean)."""
     cols = [f"{m}_p90" for m in DEF_METRICS] + list(DEF_RATIOS)
@@ -291,8 +292,12 @@ def recent_rates(ps: pd.DataFrame, latest: pd.DataFrame, seasons_back: int = 2) 
     if not have or "def_minutes" not in ps:
         return pd.DataFrame({"us_id": latest["us_id"]})
     last = int(latest["season"].max())
-    hist = ps[(ps["season"] > last - seasons_back) & ps["def_minutes"].gt(0)]
+    # each player's most recent covered seasons (up to `seasons_back`), looking back at most
+    # MAX_LOOKBACK seasons: where a league's coverage stops early (FBref ends in 2023-24) his
+    # profile comes from his last covered seasons rather than from nothing
+    hist = ps[(ps["season"] > last - MAX_LOOKBACK) & ps["def_minutes"].gt(0)]
     hist = hist[hist["us_id"].isin(set(latest["us_id"]))]
+    hist = hist.sort_values("season", ascending=False).groupby("us_id").head(seasons_back)
     prior = ps[ps["def_minutes"].gt(0)].groupby("group")[have].mean() if "group" in ps else None
     out = []
     groups = dict(zip(latest["us_id"], latest.get("group", pd.Series([None] * len(latest)))))

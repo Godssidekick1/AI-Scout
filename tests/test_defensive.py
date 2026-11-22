@@ -228,3 +228,15 @@ def test_old_model_without_defensive_columns_still_searches(monkeypatch):
     full, hist = prepare(ps, pairs)
     svc = ForecastService(ps=ps, model=ProjectionModel().fit(full, hist), minutes=MinutesModel().fit(full, ps))
     assert not svc.candidates("stopper_cb", n=5).empty
+
+
+def test_profile_reaches_back_to_the_last_covered_seasons():
+    """La Liga coverage stops in 2023-24: a 2026 player's profile uses 2022-23 and 2023-24."""
+    ps = pd.DataFrame({"us_id": ["a"] * 5, "season": [2022, 2023, 2024, 2025, 2026], "group": "CB",
+                       "league": "la_liga"})
+    table = pd.DataFrame({"us_id": ["a", "a"], "season": [2022, 2023], "def_minutes": [2700.0, 2700.0],
+                          "def_source": "fbref", **{c: np.nan for c in defensive.TOTALS}})
+    table["tackles"], table["interceptions"] = [60, 90], [30, 30]
+    ps = defensive.add_rates(ps, table)
+    prof = defensive.recent_rates(ps, ps[ps.season == 2026], seasons_back=3).set_index("us_id")
+    assert prof.at["a", "def_minutes_used"] == 5400 and prof.at["a", "def_seasons"] == "2022,2023"
