@@ -176,6 +176,9 @@ def main(argv=None) -> None:
         if args.verbose:
             print("\n".join(lines[-(len(read) + len(res) + 6):]))
 
+    if briefs._GEMINI_BROKEN:
+        reader = "rules (Gemini could not run)"
+        print(f"Gemini could not run, so these results are for the rule-based reader:\n  {briefs._GEMINI_BROKEN}\n")
     tbl = pd.DataFrame(rows)
     read_rate = tbl["read_ok"].sum() / max(tbl["read_n"].sum(), 1)
     res_rate = tbl["res_ok"].sum() / max(tbl["res_n"].sum(), 1)

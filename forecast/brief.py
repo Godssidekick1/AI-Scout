@@ -365,15 +365,25 @@ Fill only what the request states or clearly implies; leave the rest empty. Neve
 def understand(text: str, service, replace: Optional[str] = None) -> Brief:
     """Read a brief in any wording with Gemini when a key is set; the rule parser otherwise,
     or if the call fails. The result says which parser read it."""
+    global _GEMINI_BROKEN
     from config import settings
-    if settings.has_gemini() and (text or "").strip():
+    if settings.has_gemini() and (text or "").strip() and not _GEMINI_BROKEN:
         try:
             return from_llm(text, service, replace)
         except Exception as e:  # noqa: BLE001 - fall back to rules, say so
+            msg = str(e)
+            if "cannot run" in msg:          # broken install: stop trying for the rest of this session
+                _GEMINI_BROKEN = msg
             b = parse(text, service, replace=replace)
-            b.parser = f"rules (Gemini failed: {str(e)[:80]})"
+            b.parser = f"rules (Gemini failed: {msg[:300]})"
             return b
-    return parse(text, service, replace=replace)
+    b = parse(text, service, replace=replace)
+    if _GEMINI_BROKEN:
+        b.parser = "rules (Gemini unavailable: see the first error)"
+    return b
+
+
+_GEMINI_BROKEN = ""
 
 
 def from_llm(text: str, service, replace: Optional[str] = None) -> Brief:

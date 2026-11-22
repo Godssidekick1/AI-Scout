@@ -2,6 +2,7 @@
 langgraph>=1.0
 langchain-core>=1.0
 langchain-google-genai>=4.0
+aiohttp>=3.11              # google-genai uses aiohttp.ClientConnectorDNSError (3.11+)
 
 # Data + validation
 numpy>=1.26
