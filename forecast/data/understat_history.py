@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 FIRST_SEASON = 2014
 COLUMNS = ["us_id", "name", "team", "league", "season", "understat_position", "minutes", "games",
-           "goals", "assists", *METRICS]
+           "goals", "assists", "xG", "npg", *METRICS]
 
 
 def _num(value) -> float:
@@ -50,6 +50,7 @@ def rows_from_raw(raw: Iterable[Dict], league: str, season: int) -> List[Dict]:
             "understat_position": p.get("position", ""),
             "minutes": _num(p.get("time")), "games": _num(p.get("games")),
             "goals": _num(p.get("goals")), "assists": _num(p.get("assists")),
+            "xG": _num(p.get("xG")), "npg": _num(p.get("npg")),          # xG - npxG = penalties taken x 0.76
             **{m: _num(p.get(m)) for m in METRICS},
         })
     return out

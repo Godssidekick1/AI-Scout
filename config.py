@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # === LLM ===
     GEMINI_MODEL: str = "gemini-2.5-flash"          # reasoning-heavy steps (parse, find, summarise)
     GEMINI_FAST_MODEL: str = "gemini-2.5-flash-lite"  # cheap bulk steps (news sentiment)
+    # Tried in order for scouting briefs when a model's daily free quota (about 20 requests) is used
+    # up: each model has its own quota. Models your key cannot use are skipped.
+    GEMINI_BRIEF_FALLBACKS: str = "gemini-2.5-flash-lite,gemini-flash-latest,gemini-flash-lite-latest"
     LLM_TIMEOUT_S: float = 60.0
     LLM_MAX_RETRIES: int = 3
     LLM_CACHE: bool = True                          # cache structured LLM answers by prompt hash

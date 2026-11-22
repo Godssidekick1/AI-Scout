@@ -7,8 +7,10 @@ gzipped CSVs and cached on disk. The dataset is frozen at 6 July 2026, which
 is fine for fitting on past seasons; live values come from the scraper in
 data_sources/transfermarkt_source.py.
 
-We also use it to give Understat players what Understat lacks: an age and a
-detailed position. `match_players` links the two by name and club.
+We also use it to give Understat players what Understat lacks: an age, a
+detailed position, where each one actually lined up recently (`game_lineups`:
+the position of every start), and his current club, which is newer than the
+last Understat season. `match_players` links the two by name and club.
 """
 
 from __future__ import annotations
@@ -29,7 +31,8 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://pub-e682421888d945d684bcae8890b0ec20.r2.dev/data"
-TABLES = ("players", "player_valuations", "transfers", "clubs")
+TABLES = ("players", "player_valuations", "transfers", "clubs", "game_lineups")
+LINEUP_COLUMNS = ["date", "player_id", "type", "position"]
 
 
 def data_dir() -> Path:
@@ -53,11 +56,11 @@ def download(tables: Iterable[str] = TABLES, force: bool = False) -> Dict[str, P
     return paths
 
 
-def load(table: str) -> pd.DataFrame:
+def load(table: str, usecols: Optional[List[str]] = None) -> pd.DataFrame:
     path = data_dir() / f"{table}.csv.gz"
     if not path.exists():
         download([table])
-    return pd.read_csv(path, low_memory=False)
+    return pd.read_csv(path, low_memory=False, usecols=usecols)
 
 
 # ── name matching ──────────────────────────────────────────────
@@ -136,3 +139,76 @@ def value_at(valuations: pd.DataFrame, when: str) -> Dict[int, float]:
     v = valuations[valuations["date"].astype(str) <= when]
     last = v.sort_values("date").groupby("player_id").tail(1)
     return dict(zip(last["player_id"], last["market_value_in_eur"].astype(float)))
+
+
+# ── recent positions and current clubs ─────────────────────────
+
+def position_shares(lineups: pd.DataFrame, since: str, min_starts: int = 5) -> Dict[int, Dict[str, float]]:
+    """{player_id: {position: share of his starts}} for starts on or after `since`. Transfermarkt
+    lists one main position per player; this is where he actually played. Players with fewer than
+    `min_starts` starts are left out (their main position is used instead)."""
+    from forecast.config import POSITION_SHORT
+    d = lineups[(lineups["type"] == "starting_lineup") & (lineups["date"].astype(str) >= since)
+                & lineups["position"].isin(POSITION_SHORT)]          # drops vague "Defender", "Attack", keepers
+    counts = d.groupby(["player_id", "position"]).size()
+    out: Dict[int, Dict[str, float]] = {}
+    for pid, s in counts.groupby(level=0):
+        total = int(s.sum())
+        if total >= min_starts:
+            out[int(pid)] = {pos: round(c / total, 3) for (_, pos), c in s.items()}
+    return out
+
+
+def team_club_ids(understat: pd.DataFrame, us_to_tm: Dict[str, Optional[int]], valuations: pd.DataFrame,
+                  season: int) -> Dict[str, int]:
+    """Understat team name -> Transfermarkt club id, by majority vote of that season's matched players'
+    clubs in the value history (names differ: 'Bayern Munich' vs 'FC Bayern München')."""
+    lo, hi = f"{season}-07-01", f"{season + 1}-06-30"
+    v = valuations[(valuations["date"].astype(str) >= lo) & (valuations["date"].astype(str) <= hi)]
+    club_of = v.groupby("player_id")["current_club_id"].agg(lambda x: x.mode().iloc[0])
+    rows = understat[understat["season"] == season]
+    votes: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    for us_id, team in zip(rows["us_id"], rows["team"]):
+        tm = us_to_tm.get(us_id)
+        if tm is not None and tm in club_of.index:
+            votes[team][int(club_of[tm])] += 1
+    return {team: max(c, key=c.get) for team, c in votes.items() if c}
+
+
+def player_profiles(ps: pd.DataFrame, players: pd.DataFrame, valuations: pd.DataFrame,
+                    lineups: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """One row per Understat player: where he lined up recently and where he plays now.
+
+    current_club / current_league  Transfermarkt's current club (newer than Understat's last season);
+                                   the league key for big-five clubs, else the Transfermarkt competition id
+    moved                          his current club is not the team of his last Understat season
+    active                         he played in a competition Transfermarkt tracks in its latest season
+                                   (False: retired, or moved somewhere the data does not cover)
+    position_shares                {Transfermarkt position: share of his starts} over the last two seasons
+    """
+    from forecast.config import TM_COMPETITIONS
+    tm_league = {v: k for k, v in TM_COMPETITIONS.items()}
+    latest = ps.sort_values("season").groupby("us_id").tail(1)
+    us_to_tm = {u: (int(t) if pd.notna(t) else None) for u, t in zip(latest["us_id"], latest["tm_id"])}
+    clubs: Dict[str, int] = {}
+    for season in sorted(latest["season"].unique()):
+        clubs.update(team_club_ids(ps, us_to_tm, valuations, int(season)))
+    team_of_club = {c: t for t, c in clubs.items()}
+    prof = players.set_index("player_id")
+    newest = int(pd.to_numeric(prof["last_season"], errors="coerce").max())
+    shares = position_shares(lineups, f"{newest - 1}-07-01") if lineups is not None else {}
+    rows = []
+    for us_id, team, tm in zip(latest["us_id"], latest["team"], latest["tm_id"]):
+        if pd.isna(tm) or int(tm) not in prof.index:
+            continue
+        p = prof.loc[int(tm)]
+        club_id = int(p["current_club_id"]) if pd.notna(p["current_club_id"]) else None
+        moved = club_id is not None and team in clubs and clubs[team] != club_id
+        comp = p.get("current_club_domestic_competition_id")
+        rows.append({"us_id": us_id,
+                     "current_club": team_of_club.get(club_id, p["current_club_name"]) if moved else team,
+                     "current_league": tm_league.get(comp, comp if isinstance(comp, str) else None),
+                     "moved": bool(moved),
+                     "active": bool(pd.notna(p["last_season"]) and int(p["last_season"]) >= newest),
+                     "position_shares": shares.get(int(tm))})
+    return pd.DataFrame(rows).set_index("us_id") if rows else pd.DataFrame()

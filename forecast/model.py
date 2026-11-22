@@ -5,6 +5,7 @@ For player i, metric m (per 90), next season:
 
     y_hat = theta * (1 + lambda[L_next - L_now, m, g]    league tax, per metric and position group g
                      + beta_m  * dElo / 100             change in team strength
+                     + s_m * dStyle                     new team's output per match vs old team's
                      + gamma_m * dUsage                 expected change in his share of the team's output
                      + a_m * age_step(g, age)           position age curve (delta method)
                      + d_m * trend / theta)             his own recent trajectory (late bloomers)
@@ -32,13 +33,13 @@ import pandas as pd
 
 from forecast.config import LEAGUES, METRICS, POSITION_GROUPS, REFERENCE_LEAGUE
 
-ALL_TERMS: Tuple[str, ...] = ("league", "team", "usage", "age", "trend")
+ALL_TERMS: Tuple[str, ...] = ("league", "team", "style", "usage", "age", "trend")
 DECAY = 0.6                        # weight of a season relative to the one after it
 K_GRID = (150, 300, 600, 900, 1350, 2000, 3000, 4500)   # shrinkage strength, in minutes
 Z80 = 1.2816                       # half-width of an 80% normal interval, in standard deviations
 AGE_RANGE = (17, 37)
 THETA_FLOOR = 0.25
-TERM_OF = {"league": "league", "team_elo_per_100": "team", "usage_share_change": "usage",
+TERM_OF = {"league": "league", "team_elo_per_100": "team", "team_style_change": "style", "usage_share_change": "usage",
            "age_curve": "age", "personal_trend": "trend", "intercept": "drift"}                 # relative terms use max(theta, 25% of the group mean) as the base
 
 
@@ -227,6 +228,10 @@ class ProjectionModel:
         if "team" in self.terms:
             cols.append("team_elo_per_100"); pens.append(self.ridge)
             blocks.append((pairs["elo_next"].to_numpy(float) - pairs["elo"].to_numpy(float)) / 100)
+        if "style" in self.terms and f"dstyle_{m}" in pairs:
+            # the new team's output per match relative to his old team's (possession style, not just strength)
+            cols.append("team_style_change"); pens.append(self.ridge)
+            blocks.append(pairs[f"dstyle_{m}"].to_numpy(float))
         if "usage" in self.terms:
             cols.append("usage_share_change"); pens.append(self.ridge)
             blocks.append(pairs[f"dusage_{m}"].to_numpy(float))

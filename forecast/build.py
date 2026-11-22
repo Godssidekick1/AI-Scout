@@ -35,7 +35,7 @@ logger = logging.getLogger("forecast.build")
 RESULTS = Path(__file__).resolve().parent.parent / "evals" / "results"
 
 
-def load_real(seasons: List[int], elo_source: str = "auto") -> Tuple[pd.DataFrame, Dict[str, float]]:
+def load_real(seasons: List[int], elo_source: str = "auto") -> Tuple[pd.DataFrame, Dict[str, float], pd.DataFrame]:
     from forecast.data import clubelo, transfermarkt
     from forecast.data.understat_history import load_seasons
 
@@ -55,7 +55,12 @@ def load_real(seasons: List[int], elo_source: str = "auto") -> Tuple[pd.DataFram
     ps = player_seasons(us, players, us_to_tm, team_elo)
     latest_values = transfermarkt.value_at(valuations, dt.date.today().isoformat())
     values = {u: latest_values.get(t) for u, t in us_to_tm.items() if t is not None and t in latest_values}
-    return ps, values
+    lineups = transfermarkt.load("game_lineups", usecols=transfermarkt.LINEUP_COLUMNS)
+    profiles = transfermarkt.player_profiles(ps, players, valuations, lineups)
+    logger.info("Transfermarkt profiles: %d players, %d with recent lineups, %d moved since %s",
+                len(profiles), int(profiles["position_shares"].notna().sum()) if len(profiles) else 0,
+                int(profiles["moved"].sum()) if len(profiles) else 0, int(ps["season"].max()))
+    return ps, values, profiles
 
 
 ELO_USED = {"source": "clubelo"}
@@ -111,13 +116,13 @@ def check_sources() -> bool:
     return all_ok
 
 
-def load_synthetic(seed: int = 7) -> Tuple[pd.DataFrame, Dict[str, float]]:
+def load_synthetic(seed: int = 7) -> Tuple[pd.DataFrame, Dict[str, float], pd.DataFrame]:
     from forecast import synthetic
     us, tm, us_to_tm, team_elo = synthetic.generate(seed=seed)
     ps = player_seasons(us, tm, us_to_tm, team_elo)
     rng = np.random.default_rng(seed)
     values = {u: float(np.exp(rng.normal(16, 1))) for u in ps["us_id"].unique()}
-    return ps, values
+    return ps, values, synthetic.profiles(ps, seed)
 
 
 def report(res: Dict[str, pd.DataFrame], model: ProjectionModel, synthetic: bool, test_seasons: List[int],
@@ -165,9 +170,9 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     current = current_understat_season()
     if args.synthetic:
-        ps, values = load_synthetic()
+        ps, values, profiles = load_synthetic()
     else:
-        ps, values = load_real(list(range(args.first_season, current + 1)), args.elo)
+        ps, values, profiles = load_real(list(range(args.first_season, current + 1)), args.elo)
 
     pairs = season_pairs(ps)
     completed = pairs[pairs["target_season"] < current] if not args.synthetic else pairs
@@ -183,7 +188,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
     out = RESULTS / f"backtest_{'synthetic_' if args.synthetic else ''}{dt.date.today().isoformat()}.md"
     out.write_text(text)
-    path = ForecastService(ps=ps, model=model, minutes=minutes, values=values,
+    path = ForecastService(ps=ps, model=model, minutes=minutes, values=values, profiles=profiles,
                            backtest_summary=text, synthetic=args.synthetic).save()
     print(backtest.to_markdown(backtest.ladder_table(res["scores"])))
     print(f"\nReport: {out}\nModel:  {path}")

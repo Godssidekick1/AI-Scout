@@ -95,8 +95,19 @@ def metric_scales(rows: pd.DataFrame) -> Dict[str, float]:
     return {m: float(rows[f"{m}_p90"].std() or 1.0) for m in METRICS}
 
 
-def style_vector(per90: Dict[str, float], scales: Dict[str, float]) -> np.ndarray:
-    v = np.array([float(per90.get(m, 0.0)) / scales[m] for m in METRICS])
+def group_centres(rows: pd.DataFrame, min_minutes: int = 900) -> Dict[str, Dict[str, float]]:
+    """Typical per-90s for each position group (players with a real sample)."""
+    regular = rows[rows["minutes"] >= min_minutes]
+    return {g: {m: float(d[f"{m}_p90"].mean()) for m in METRICS} for g, d in regular.groupby("group")}
+
+
+def style_vector(per90: Dict[str, float], scales: Dict[str, float],
+                 centre: Optional[Dict[str, float]] = None) -> np.ndarray:
+    """Shape of a player's output. With `centre` (his position's typical per-90s) it is the shape
+    of how he DIFFERS from a typical player there; without it, every centre-back points the same
+    way (mostly build-up) and similarities all land near 100."""
+    c = centre or {}
+    v = np.array([(float(per90.get(m, 0.0)) - c.get(m, 0.0)) / scales[m] for m in METRICS])
     n = np.linalg.norm(v)
     return v / n if n > 0 else v
 

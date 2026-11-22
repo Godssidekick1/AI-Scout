@@ -55,6 +55,10 @@ class BriefSpec(BaseModel):
                                       "Saka for goals' -> player 'Saka', quality goal_threat.")
     positions: List[PositionKey] = Field(default_factory=list, description="Positions wanted. A winger of any kind "
                                          "(inside, inverted, wide forward) is winger, never striker.")
+    also_positions: List[PositionKey] = Field(default_factory=list, description="Positions he must ALSO be able to "
+                                              "play: 'a goalscoring midfielder who can play holding mid' -> positions "
+                                              "[central_mid], also_positions [defensive_mid]. Not for emergency cover "
+                                              "('if forced', 'at a push'): put that in unmeasured.")
     side: Optional[Literal["left", "right"]] = Field(default=None, description="Side mentioned ('can play on the "
                                                      "left', 'left winger').")
     side_only: bool = Field(default=False, description="True only if the player must play that side ('a left "
@@ -81,6 +85,13 @@ class BriefSpec(BaseModel):
                                              "Empty means no restriction.")
     exclude_leagues: List[LeagueKey] = Field(default_factory=list, description="Leagues to leave out ('outside the "
                                              "Premier League').")
+    experience_leagues: List[LeagueKey] = Field(default_factory=list, description="Leagues he must have played in "
+                                                "before (any past season): 'EPL experience', 'proven in the Premier "
+                                                "League', 'knows the league' (= the target club's league). This is not "
+                                                "a filter on where he plays now.")
+    experience_min_minutes: Optional[int] = Field(default=None, description="Career minutes needed in that league, "
+                                                  "only if stated ('50+ Premier League games' -> 4000). Default 1800.")
+    penalty_taker: bool = Field(default=False, description="True when he should take penalties.")
     min_minutes: Optional[int] = Field(default=None, description="Minimum league minutes last season: 1800 for "
                                        "'reliable', 'regular starter', 'proven'; 450 for a squad or rotation player.")
     min_goals: Optional[float] = Field(default=None, description="League goals per season the user requires ('15+ goals').")

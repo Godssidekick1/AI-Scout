@@ -38,7 +38,7 @@ from forecast.table import team_totals
 
 LEAGUE_NAMES = {"premier_league": "Premier League", "la_liga": "La Liga", "bundesliga": "Bundesliga",
                 "serie_a": "Serie A", "ligue_1": "Ligue 1"}
-TERMS = ("league", "team", "usage", "age", "trend", "drift")
+TERMS = ("league", "team", "style", "usage", "age", "trend", "drift")
 
 
 def load(path: Optional[str]) -> ForecastService:
@@ -123,7 +123,7 @@ def cmd_player(service: ForecastService, args) -> None:
         print(f"{m:<11}{float(hit[f'{m}_p90']):>7.2f}{float(c['ability']):>9.2f}{effects}"
               f"{p[f'pred_{m}']:>8.2f}  {p[f'lo_{m}']:.2f}-{p[f'hi_{m}']:.2f}")
     print("\nnext = ability x (1 + sum of the term columns). ability = his recency-weighted level, pulled toward "
-          "his position's average when he has few minutes.\nleague = league tax, team = change in team strength, "
+          "his position's average when he has few minutes.\nleague = league tax, team = change in team strength, style = new team's output per match vs his old team's, "
           "usage = change in his share of the team's output, age = position age curve, trend = his own recent "
           "trajectory, drift = league-wide change year to year.")
 
@@ -219,10 +219,14 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
         print("\n" + b.note)
     shown = [m for m, _ in sorted(prof.weights.items(), key=lambda x: -x[1])][:3]
     extra = [c for c in ("proj_goals", "proj_assists") if c in df and getattr(b, "min_" + c[5:]) is not None]
+    facts = [(c, h) for c, h, on in (("position_share", "at pos", "position_share" in df),
+                                     ("also_share", "also", "also_share" in df),
+                                     ("experience_minutes", "exp min", bool(b.experience_leagues)),
+                                     ("pens", "pens", b.penalty_taker)) if on and c in df]
     score_col = "vs him" if him is not None else "score"
     head = (f"{'#':>3}  {'player':<23}{'club':<19}{'lg':<7}{'pos':<4}{'age':>4}{'min':>6}{'style':>6}{score_col:>7}"
             f"{'gap':>6}{'EUR M':>7}" + "".join(f"{m[:9]:>10}" for m in shown)
-            + "".join(f"{c[5:]:>8}" for c in extra))
+            + "".join(f"{c[5:]:>8}" for c in extra) + "".join(f"{h:>8}" for _, h in facts))
     print("\n" + head)
     print("-" * len(head))
 
@@ -231,11 +235,20 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
         val = f"{r['market_value_eur'] / 1e6:.1f}" if pd.notna(r["market_value_eur"]) else "?"
         gap = f"{r['value_gap']:+.1f}" if pd.notna(r.get("value_gap", np.nan)) else ""
         sty = f"{r['style_similarity']:.0f}" if pd.notna(r.get("style_similarity", np.nan)) else ""
-        pos = POSITION_SHORT.get(r.get("tm_sub_position"), r.get("group", ""))
-        return (f"{i:>3}  {str(r['name'])[:22]:<23}{str(r['team'])[:18]:<19}{LEAGUE_SHORT.get(r['league'], r['league'])[:6]:<7}"
+        pos = POSITION_SHORT.get(r.get("recent_position") or r.get("tm_sub_position"), r.get("group", ""))
+        club = str(r.get("current_club") or r["team"])[:17] + ("*" if r.get("moved") else "")
+        lg = r.get("current_league") or r["league"]
+
+        def fact(c):
+            v = r.get(c, np.nan)
+            if pd.isna(v):
+                return f"{'':>8}"
+            return f"{v:>8.0%}" if c.endswith("share") else f"{v:>8.0f}"
+        return (f"{i:>3}  {str(r['name'])[:22]:<23}{club:<19}{LEAGUE_SHORT.get(lg, str(lg))[:6]:<7}"
                 f"{pos:<4}{age:>4}{r['minutes']:>6.0f}{sty:>6}{score:>7}{gap:>6}{val:>7}"
                 + "".join(f"{r[f'pred_{m}']:>10.2f}" for m in shown)
-                + "".join(f"{r[c]:>8.1f}" if c in r and pd.notna(r[c]) else f"{'':>8}" for c in extra))
+                + "".join(f"{r[c]:>8.1f}" if c in r and pd.notna(r[c]) else f"{'':>8}" for c in extra)
+                + "".join(fact(c) for c, _ in facts))
 
     if him is not None:
         print(line("him", him, "0.00"))
@@ -248,7 +261,13 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
              if him is not None else "score = projected output in this profile next season" + at
              + " (0 = average in the role), ")
           + "in standard deviations. gap = value gap: positive = cheap for that output. "
-            "Metric columns are projected per-90 next season.\n"
+            "Metric columns are projected per-90 next season. pos = where he started most over the last two "
+            "seasons (Transfermarkt lineups)."
+          + (" * = moved since the last season in the data; club and league are his current ones (Transfermarkt), "
+             "his stats are from his old club." if "moved" in df and df["moved"].any() else "")
+          + (" at pos = share of his recent starts in the position asked for." if any(c == "position_share" for c, _ in facts) else "")
+          + (" exp min = career minutes in that league." if b.experience_leagues else "")
+          + (" pens = penalties taken, last two seasons." if b.penalty_taker else "") + "\n"
           f"Drill into one:  python -m forecast.predict player \"{df.iloc[0]['name']}\""
           + (f" --to \"{b.to_team}\"" if b.to_team else ""))
 

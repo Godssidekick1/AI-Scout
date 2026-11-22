@@ -60,6 +60,8 @@ def generate(n_players: int = 1500, seasons: Tuple[int, int] = (2014, 2025), see
     talent = rng.lognormal(0, 0.28, size=n_players)          # multiplicative talent
     team_of = [teams[i] for i in rng.integers(0, len(teams), size=n_players)]
 
+    pen_rng = np.random.default_rng(seed + 2)     # separate streams: these don't shift the stats
+    takes_pens = (pen_rng.random(n_players) < 0.25) & np.isin(groups, ["AM", "ST", "CM"])
     rows = []
     for s in range(seasons[0], seasons[1] + 1):
         for i in range(n_players):
@@ -86,6 +88,8 @@ def generate(n_players: int = 1500, seasons: Tuple[int, int] = (2014, 2025), see
                 p90 = max(rate + rng.normal(0, noise_sd), 0.0)
                 rec[m] = p90 * minutes / 90
             rec["goals"], rec["assists"] = round(rec["npxG"]), round(rec["xA"])
+            pens = pen_rng.poisson(3) if takes_pens[i] and minutes > 900 else 0
+            rec["xG"], rec["npg"] = rec["npxG"] + 0.76 * pens, rec["goals"]
             rows.append(rec)
     us = pd.DataFrame(rows)
     sub_rng = np.random.default_rng(seed + 1)      # separate stream: positions don't shift the stats
@@ -96,3 +100,23 @@ def generate(n_players: int = 1500, seasons: Tuple[int, int] = (2014, 2025), see
     us_to_tm = {str(i): i for i in range(n_players)}
     team_elo = {(t, lg, s): elo[t] for t, lg in teams for s in range(seasons[0], seasons[1] + 2)}
     return us, tm_players, us_to_tm, team_elo
+
+
+def profiles(ps: pd.DataFrame, seed: int = 7) -> pd.DataFrame:
+    """Stand-in for forecast.data.transfermarkt.player_profiles: most players start mainly at their
+    listed position, some split time with a second one, a few have moved club or stopped playing."""
+    rng = np.random.default_rng(seed + 3)
+    latest = ps.sort_values("season").groupby("us_id").tail(1)
+    teams = latest[["team", "league"]].drop_duplicates().to_numpy()
+    rows = []
+    for us_id, team, league, sub, group in zip(latest["us_id"], latest["team"], latest["league"],
+                                                latest["tm_sub_position"], latest["group"]):
+        others = [p for subs in GROUP_SUB_POSITIONS.values() for p in subs if p != sub]
+        main = rng.choice([0.9, 0.6, 0.35])
+        shares = {sub: main, str(rng.choice(others)): round(1 - main, 2)} if isinstance(sub, str) else None
+        moved = rng.random() < 0.08
+        new_team, new_league = teams[rng.integers(len(teams))] if moved else (team, league)
+        rows.append({"us_id": us_id, "current_club": new_team, "current_league": new_league,
+                     "moved": bool(moved and new_team != team), "active": bool(rng.random() > 0.03),
+                     "position_shares": shares})
+    return pd.DataFrame(rows).set_index("us_id")

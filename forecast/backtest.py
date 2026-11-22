@@ -28,8 +28,9 @@ LADDER: List[tuple] = [
     ("ability", ()),
     ("+league", ("league",)),
     ("+team", ("league", "team")),
-    ("+usage", ("league", "team", "usage")),
-    ("+age", ("league", "team", "usage", "age")),
+    ("+style", ("league", "team", "style")),
+    ("+usage", ("league", "team", "style", "usage")),
+    ("+age", ("league", "team", "style", "usage", "age")),
     ("+trend", ALL_TERMS),
 ]
 

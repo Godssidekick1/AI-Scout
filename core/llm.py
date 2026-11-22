@@ -84,7 +84,14 @@ async def with_retries(fn: Callable[[], Awaitable[R]], what: str,
             # a broken or outdated install, or a code bug: retrying cannot help
             raise LLMError(f"{what} cannot run ({type(e).__name__}: {e}). This is an environment problem, "
                            "not a network one: try  pip install -U -r requirements.txt") from e
-        except Exception as e:  # noqa: BLE001 - network, quota, timeouts: worth retrying
+        except Exception as e:  # noqa: BLE001 - network, rate limits, timeouts: worth retrying
+            text = str(e)
+            if "RESOURCE_EXHAUSTED" in text and ("PerDay" in text or "per day" in text.lower()):
+                # a daily quota resets in hours: retrying in seconds only burns time
+                raise LLMError(f"{what}: Gemini daily quota used up (free tier allows about 20 requests a day "
+                               "per model); it resets within 24 hours") from e
+            if "NOT_FOUND" in text or "404" in text.split("(")[0] or "is not found" in text:
+                raise LLMError(f"{what}: model not available to this key ({text[:200]})") from e
             last = e
             if i == attempts:
                 break

@@ -373,7 +373,7 @@ def test_brief_parses_player_money_age_leagues_and_emphasis(service):
     assert b.replace["us_id"] == p["us_id"] and b.to_team == p["team"]
     assert b.max_value_eur == 30e6 and b.max_age == p["age"] - 1          # 30m is money, not an age
     assert "premier_league" not in b.leagues and len(b.leagues) == 4
-    assert b.emphasis["xGBuildup"] == 2.0 and "in the air" in b.unmeasured
+    assert b.emphasis["xGBuildup"] == 0.6 and "in the air" in b.unmeasured
 
     b = brief.parse("creative winger u21 from serie a, hidden gems, budget EUR 5m", service)
     assert (b.role, b.max_age, b.leagues, b.sort, b.max_value_eur) == ("creative_winger", 21, ["serie_a"], "value", 5e6)
@@ -455,7 +455,7 @@ def test_llm_brief_is_checked_against_the_data(service, monkeypatch):
     b = brief.understand("a cb for them who is good on the ball, reliable, adaptable, under 40m", service)
     assert b.parser == "Gemini" and b.replace["us_id"] == p["us_id"] and b.to_team == club
     assert b.max_age == p["age"] - 1 and b.max_value_eur == 40e6 and "premier_league" not in b.leagues
-    assert b.emphasis["xGBuildup"] == 2.0 and b.unmeasured == ["defending", "versatility"]
+    assert b.emphasis["xGBuildup"] == 0.6 and b.unmeasured == ["defending", "versatility"]
     df, him, _ = brief.search(b, service, n=3)
     assert him is not None
 

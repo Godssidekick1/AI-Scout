@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from forecast.config import LEAGUES, METRICS, POSITIONS, SIDES, groups_for
-from forecast.roles import ROLES, RoleProfile, metric_scales, role_from_text, style_vector
+from forecast.roles import ROLES, RoleProfile, group_centres, metric_scales, role_from_text, style_vector
 
 LEAGUE_WORDS: Dict[str, Tuple[str, ...]] = {
     "premier_league": ("premier league", "epl", "england", "english"),
@@ -36,19 +36,26 @@ LEAGUE_WORDS: Dict[str, Tuple[str, ...]] = {
     "ligue_1": ("ligue 1", "ligue1", "france", "french"),
 }
 
-# description words -> metric multipliers
+# description words -> the metrics that quality is made of. An emphasis takes EMPHASIS_SHARE of the
+# ranking weight away from the role and gives it to these metrics, so it works even when the role
+# itself puts no weight on them (a holding midfielder who scores).
 EMPHASIS: List[Tuple[str, Tuple[str, ...], Dict[str, float]]] = [
     ("build-up / progression", ("progressive", "progression", "passer", "passing", "build-up", "buildup",
-                                "build up", "ball-playing", "progress", "possession", "steps into", "ball playing", "distribut", "deep-lying", "carries",
-                                "carrier", "on the ball"),
-     {"xGBuildup": 2.0, "xGChain": 1.5}),
+                                "build up", "ball-playing", "progress", "possession", "steps into", "ball playing",
+                                "distribut", "deep-lying", "carries", "carrier", "on the ball", "calm", "tempo",
+                                "dictat", "control the game", "controls the game", "keeps the ball", "keep the ball",
+                                "retain"),
+     {"xGBuildup": 0.6, "xGChain": 0.4}),
     ("chance creation", ("creative", "creator", "creat", "assist", "playmak", "vision", "key pass", "chances for"),
-     {"xA": 2.0, "key_passes": 2.0}),
-    ("goal threat", ("goals", "goal threat", "goalscor", "scorer", "scores", "into the box", "scoring", "finisher", "clinical", "box presence", "poach"),
-     {"npxG": 2.0, "shots": 1.5}),
-    ("shooting volume", ("shooter", "shots", "shoots"), {"shots": 2.0}),
-    ("involvement", ("involved", "link-up", "link up", "combination", "combines"), {"xGChain": 2.0}),
+     {"xA": 0.5, "key_passes": 0.5}),
+    ("goal threat", ("goals", "goal threat", "goalscor", "goal scor", "goal-scor", "scorer", "scores", "into the box",
+                     "scoring", "finisher", "finishing", "clinical", "box presence", "poach"),
+     {"npxG": 0.7, "shots": 0.3}),
+    ("shooting volume", ("shooter", "shots", "shoots", "shooting", "long range", "long-range", "from distance"),
+     {"shots": 0.7, "npxG": 0.3}),
+    ("involvement", ("involved", "link-up", "link up", "combination", "combines"), {"xGChain": 1.0}),
 ]
+EMPHASIS_SHARE = 0.5
 UNMEASURED = ("track back", "tracks back", "tracking back", "work rate", "hard-working", "hard working", "adaptab",
               "versatil", "any formation", "formations", "any system", "multiple positions", "two-footed", "leader",
               "mentality", "attitude", "tackl", "intercept", "aerial", "header", "defensive", "defending", "duel",
@@ -69,6 +76,10 @@ NAME_PATTERNS = (
     r"(?:the next|a new|another)\s+(?P<n>[^,.;:]+?)(?=\s*[,.;:]|\s+(?:with|who|for|at|under)|$)",
     r"(?P<n>[A-Z][\w'\-]+(?:\s+[A-Z][\w'\-]+)*)\s+(?:replacement|type|clone|successor)\b",
 )
+
+
+EXPERIENCE_MINUTES = 1800      # "EPL experience": 20 full matches' worth, so a few cameos don't count
+ALSO_SHARE = 0.10              # "can also play X": at least this share of his recent starts there
 
 
 @dataclass
@@ -101,6 +112,10 @@ class Brief:
     squad_role: Optional[str] = None          # starter / rotation / backup
     exclude_own_club: bool = True             # leave the target club's own players out
     bars: List[Tuple[str, str, float]] = field(default_factory=list)  # filled by search(): (name, metric, per 90)
+    also_positions: List[str] = field(default_factory=list)  # must ALSO have played these ("can play holding mid too")
+    experience_leagues: List[str] = field(default_factory=list)   # career minutes needed in one of these leagues
+    experience_minutes: int = EXPERIENCE_MINUTES
+    penalty_taker: bool = False               # took 2+ penalties over the last two seasons
 
     def describe(self) -> List[str]:
         out = []
@@ -112,7 +127,11 @@ class Brief:
         elif self.replace_query:
             out.append(f"no player matched '{self.replace_query}' (ignored; try the full name)")
         if self.positions:
-            out.append("position: " + ", ".join(p.replace("_", " ") for p in self.positions))
+            out.append("position: " + ", ".join(p.replace("_", " ") for p in self.positions)
+                       + " (half or more of his starts over the last two seasons)")
+        if self.also_positions:
+            out.append("must also play: " + ", ".join(p.replace("_", " ") for p in self.also_positions)
+                       + f" ({ALSO_SHARE:.0%}+ of recent starts)")
         if self.side:
             out.append(f"{self.side} side " + ("only" if self.side_strict else "preferred (shown in pos column)"))
         if self.role:
@@ -138,6 +157,11 @@ class Brief:
         if self.leagues:
             out.append("leagues: " + ", ".join(self.leagues))
         out.append(f"min {self.min_minutes} minutes last season")
+        if self.experience_leagues:
+            out.append(f"experience: {self.experience_minutes}+ career minutes in "
+                       + " or ".join(LEAGUE_LABEL.get(lg, lg) for lg in self.experience_leagues))
+        if self.penalty_taker:
+            out.append("penalty taker: 2+ penalties taken over the last two seasons")
         if self.min_goals is not None:
             out.append(f"projected {self.min_goals:g}+ goals next season (npxG over his expected minutes)")
         if self.min_assists is not None:
@@ -148,8 +172,43 @@ class Brief:
         return out
 
 
+LEAGUE_LABEL = {"premier_league": "the Premier League", "la_liga": "La Liga", "bundesliga": "the Bundesliga",
+                "serie_a": "Serie A", "ligue_1": "Ligue 1"}
+
+
 def _has(t: str, cue: str) -> bool:
     return re.search(rf"(?<![a-z]){re.escape(cue)}", t) is not None
+
+
+def _league_alt(lg: str) -> str:
+    return "|".join(re.escape(w) for w in LEAGUE_WORDS[lg])
+
+
+def experience_asks(t: str, home_league: Optional[str] = None) -> Tuple[List[str], str]:
+    """Leagues the player must have experience in ("EPL experience", "proven in the Premier League",
+    "knows the league" = the target club's league), and the text with those phrases removed so they
+    are not also read as a league filter or a minutes ask."""
+    found = []
+    for lg in LEAGUE_WORDS:
+        w = _league_alt(lg)
+        pats = (rf"\b(?:{w})\s+(?:experience|experienced|pedigree|proven|background|minutes|games|appearances)\b",
+                rf"\b(?:experience|experienced|proven|played|track record|pedigree|background|minutes|games|appearances)"
+                rf"\s+(?:(?:of|in|at|from)\s+)?(?:the\s+)?(?:{w})\b",
+                rf"\bknows?\s+(?:the\s+)?(?:{w})\b",
+                rf"\b(?:used|adapted|accustomed)\s+to\s+(?:the\s+)?(?:{w})\b")
+        for pat in pats:
+            if re.search(pat, t):
+                found.append(lg)
+                t = re.sub(pat, " ", t)
+    if home_league and re.search(r"\b(?:knows?|used to|adapted to|accustomed to|experience (?:in|of))\s+the\s+league\b"
+                                 r"|\bleague experience\b", t):
+        found.append(home_league)
+        t = re.sub(r"\b(?:knows?|used to|adapted to|accustomed to|experience (?:in|of))\s+the\s+league\b"
+                   r"|\bleague experience\b", " ", t)
+    return list(dict.fromkeys(found)), t
+
+
+PENALTY = re.compile(r"\b(?:penalt(?:y|ies)(?!\s+(?:box|area))|spot[- ]?kicks?|pens\b|from the spot)")
 
 
 def _club_names(service) -> List[str]:
@@ -199,6 +258,10 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
         t = t.replace(b.to_team.lower(), " ")
     elif b.replace is not None:
         b.to_team = b.replace["team"]
+
+    # league experience, before league filters, minutes and age read the same words
+    home = service._team_row(b.to_team) if b.to_team else None
+    b.experience_leagues, t = experience_asks(t, home["league"] if home is not None else None)
 
     # money first, so "under 30m" is not read as an age
     for m in MONEY.finditer(t):
@@ -250,23 +313,28 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     if m := re.search(r"\b(\d{1,2})\s*\+?\s*(?:or more\s+)?(?:league\s+)?assists\b", t):
         b.min_assists = float(m.group(1))
 
+    # penalties are measurable (Understat's penalty xG), so they are a filter, not a ranking weight
+    b.penalty_taker = bool(PENALTY.search(t))
+    t_play = PENALTY.sub(" ", t)
+
     # role, emphasis, unmeasured asks, sort
-    b.role = role_from_text(re.sub(r"forward (?:pass|run|carr)\w*", " ", t))
-    for label, cues, mult in EMPHASIS:
-        if any(_has(t, c) for c in cues):
-            b.emphasis_labels.append(label)
-            for k, v in mult.items():
-                b.emphasis[k] = max(b.emphasis.get(k, 1.0), v)
+    b.role = role_from_text(re.sub(r"forward (?:pass|run|carr)\w*", " ", t_play))
+    for label, cues, shares in EMPHASIS:
+        if any(_has(t_play, c) for c in cues):
+            add_emphasis(b, label, shares)
     b.unmeasured = sorted({c for c in UNMEASURED if _has(t, c)})
     if any(_has(t, c) for c in HIDDEN):
         b.sort = "value"
 
-    # positions and side
-    for key, cues in POSITION_CUES:
-        if any(_has(t, c) for c in cues) and key not in b.positions:
-            b.positions.append(key)
-    if "striker" in b.positions and re.search(r"inside forward|wide forward", t):
-        b.positions.remove("striker")
+    # positions: what he is, what he must also play, and emergency cover (not measurable)
+    b.positions, b.also_positions, cover = read_positions(t)
+    if cover:
+        b.unmeasured.append("emergency cover at " + ", ".join(p.replace("_", " ") for p in cover))
+    if b.positions and (b.role is None or ROLE_POSITION.get(b.role) not in b.positions[:1]):
+        # the role follows the main position: "a goalscoring midfielder who can play holding mid" is a
+        # box-to-box player who also covers the 6, not a deep-lying playmaker
+        b.role = (ROLES_FOR_SCORING.get(b.positions[0]) if b.emphasis.get("npxG") else None) \
+            or POSITION_ROLE[b.positions[0]]
     for side in ("left", "right"):
         if re.search(rf"\b{side}(?:\s+wing(?:er)?|-sided|\s+side|\s+flank)|on the {side}|\b{side}[- ]?(?:back|mid)", t):
             b.side = b.side or side
@@ -297,20 +365,60 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     return b
 
 
-POSITION_CUES = [
-    ("winger", ("winger", "wide player", "inside forward", "wide forward", "wide attacker", " rw", " lw")),
-    ("striker", ("striker", "centre-forward", "center-forward", "centre forward", "number 9", "no.9", "no. 9")),
-    ("attacking_mid", ("attacking midfielder", "number 10", "no.10", "no. 10", "playmaker")),
-    ("defensive_mid", ("defensive midfielder", "holding midfielder", "number 6", "no.6", "anchor", "regista")),
-    ("central_mid", ("central midfielder", "box-to-box", "box to box", "number 8", "no.8")),
-    ("fullback", ("full-back", "fullback", "full back", "wing-back", "wingback", "right-back", "left-back")),
-    ("centre_back", ("centre-back", "center-back", "centre back", "center back", "cb")),
+POSITION_CUES = [   # (position, regex). Order matters only for overlapping words.
+    ("winger", r"\bwingers?\b|\bwide (?:player|forward|attacker|man|midfielder)|inside forward|\b[rl]w\b|\b[rl]m\b"),
+    ("striker", r"\bstrikers?\b|cent(?:re|er)[- ]forward|number 9\b|no\.? ?9\b|\bcf\b"),
+    ("attacking_mid", r"attacking mid(?:fielder)?s?\b|number 10\b|no\.? ?10\b|\bcam\b|(?<!deep-lying )(?<!deep lying )\bplaymaker"
+                      r"(?! winger)"),
+    ("defensive_mid", r"(?:defensive|holding) mid(?:fielder)?s?\b|number 6\b|no\.? ?6\b|\bcdm\b|\bdm\b|\banchor(?:man)?\b"
+                      r"|\bregista\b|deep[- ]lying|\bpivot\b|\bthe 6\b"),
+    ("central_mid", r"central mid(?:fielder)?s?\b|box[- ]to[- ]box|number 8\b|no\.? ?8\b|\bcm\b|\bthe 8\b"
+                    r"|(?<!defensive )(?<!holding )(?<!attacking )(?<!central )(?<!wide )\bmidfielders?\b"),
+    ("fullback", r"full[- ]?backs?\b|wing[- ]?backs?\b|(?:right|left)[- ]backs?\b|\b[rl]wb\b|\b[rl]b\b"),
+    ("centre_back", r"cent(?:re|er)[- ]?backs?\b|\bcbs?\b|\bcentral defender|\bstopper\b"),
 ]
+ALSO_CUE = re.compile(r"\b(?:can|could|able to|also|comfortable|happy to|willing to|capable of|option to)\b[^.;,]*"
+                      r"\b(?:play|plays|playing|cover|covers|covering|drop|dropping|fill in|filling in)\b[^.;,]*$")
+COVER_CUE = re.compile(r"\b(?:if forced|if needed|if required|at a push|in an emergency|in a pinch|when needed)\b[^.;,]*$")
+
+
+def read_positions(t: str) -> Tuple[List[str], List[str], List[str]]:
+    """(main positions, positions he must also play, emergency cover) in the order they are mentioned.
+    'can also play as the holding mid' -> also; 'if forced wingback' -> cover (not checked: lineups
+    cannot show what a player could do in an emergency). If every mention is an 'also', they are main."""
+    hits = []
+    for key, rx in POSITION_CUES:
+        for m in re.finditer(rx, t):
+            before = t[max(0, m.start() - 60):m.start()]
+            kind = "cover" if COVER_CUE.search(before) else "also" if ALSO_CUE.search(before) else "main"
+            hits.append((m.start(), key, kind))
+    hits.sort()
+    main = list(dict.fromkeys(k for _, k, kind in hits if kind == "main"))
+    also = list(dict.fromkeys(k for _, k, kind in hits if kind == "also" and k not in main))
+    cover = list(dict.fromkeys(k for _, k, kind in hits if kind == "cover" and k not in main and k not in also))
+    if not main and also:
+        main, also = also, []
+    if "striker" in main and re.search(r"inside forward|wide forward", t):
+        main.remove("striker")
+    return main, also, cover
+
+
+def add_emphasis(b: "Brief", label: str, shares: Dict[str, float]) -> None:
+    """Add one quality's metrics to the brief's emphasis (shares; profile() normalises them)."""
+    if label in b.emphasis_labels:
+        return
+    b.emphasis_labels.append(label)
+    for k, v in shares.items():
+        b.emphasis[k] = b.emphasis.get(k, 0.0) + v
 POSITION_ROLE = {"winger": "creative_winger", "striker": "complete_forward", "attacking_mid": "playmaker",
                  "central_mid": "box_to_box", "defensive_mid": "deep_playmaker", "fullback": "attacking_fullback",
                  "centre_back": "ball_playing_cb"}
 ROLE_POSITIONS = {"creative_winger": ["winger"], "inside_forward": ["winger"], "poacher": ["striker"],
                   "complete_forward": ["striker"], "attacking_fullback": ["fullback"], "ball_playing_cb": ["centre_back"]}
+ROLE_POSITION = {"creative_winger": "winger", "inside_forward": "winger", "poacher": "striker",
+                 "complete_forward": "striker", "playmaker": "attacking_mid", "box_to_box": "central_mid",
+                 "deep_playmaker": "defensive_mid", "attacking_fullback": "fullback", "ball_playing_cb": "centre_back"}
+ROLES_FOR_SCORING = {"winger": "inside_forward", "striker": "complete_forward"}   # a scoring ask changes the role
 
 
 def apply_squad_role(b: Brief, upside: bool = False) -> None:
@@ -345,7 +453,7 @@ def understand(text: str, service, replace: Optional[str] = None) -> Brief:
             return from_llm(text, service, replace)
         except Exception as e:  # noqa: BLE001 - fall back to rules, say so
             msg = str(e)
-            if "cannot run" in msg:          # broken install: stop trying for the rest of this session
+            if "cannot run" in msg or "daily quota" in msg or "every Gemini model" in msg:   # won't fix itself soon
                 _GEMINI_BROKEN = msg
             b = parse(text, service, replace=replace)
             b.parser = f"rules (Gemini failed: {msg[:300]})"
@@ -364,10 +472,29 @@ def from_llm(text: str, service, replace: Optional[str] = None) -> Brief:
     from langchain_core.messages import HumanMessage, SystemMessage
     from core import llm
     from models.llm_schemas import BriefSpec
+    from config import settings
     msg = text if not replace else f"Player to replace: {replace}\nRequest: {text}"
-    spec = asyncio.run(llm.structured(BriefSpec, [SystemMessage(content=LLM_PROMPT), HumanMessage(content=msg)],
-                                      name="forecast.brief", temperature=0.0))
-    return from_spec(spec, service, text, replace)
+    models = [settings.GEMINI_MODEL] + [m.strip() for m in settings.GEMINI_BRIEF_FALLBACKS.split(",")
+                                        if m.strip() and m.strip() != settings.GEMINI_MODEL]
+    global _MODEL_START
+    last: Optional[Exception] = None
+    for i in range(_MODEL_START, len(models)):
+        try:
+            spec = asyncio.run(llm.structured(BriefSpec, [SystemMessage(content=LLM_PROMPT), HumanMessage(content=msg)],
+                                              name="forecast.brief", model=models[i], temperature=0.0))
+        except llm.LLMError as e:
+            if "daily quota" not in str(e) and "not available" not in str(e):
+                raise
+            last, _MODEL_START = e, i + 1      # skip this model for the rest of the session
+            continue
+        b = from_spec(spec, service, text, replace)
+        b.parser = f"Gemini ({models[i]})"
+        return b
+    raise llm.LLMError(f"every Gemini model's daily quota is used up or unavailable ({', '.join(models)}); "
+                       f"last error: {str(last)[:200]}")
+
+
+_MODEL_START = 0       # first model still worth trying this session
 
 
 def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> Brief:
@@ -391,11 +518,7 @@ def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> B
     b.role = spec.role
     for key in spec.emphasis:
         label = EMPHASIS_KEYS[key]
-        b.emphasis_labels.append(label)
-        for lbl, _, mult in EMPHASIS:
-            if lbl == label:
-                for k, v in mult.items():
-                    b.emphasis[k] = max(b.emphasis.get(k, 1.0), v)
+        add_emphasis(b, label, next(sh for lbl, _, sh in EMPHASIS if lbl == label))
     b.min_age = float(spec.min_age) if spec.min_age else None
     b.max_age = float(spec.max_age) if spec.max_age else None
     if spec.younger_than_replaced and b.max_age is None and b.replace is not None and pd.notna(b.replace.get("age")):
@@ -411,6 +534,13 @@ def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> B
     b.sort = "value" if spec.hidden_talent else "fit"
     b.unmeasured = list(dict.fromkeys(u.strip().lower() for u in spec.unmeasured if u.strip()))
     b.positions = [p for p in dict.fromkeys(spec.positions) if p in POSITIONS]
+    b.also_positions = [p for p in dict.fromkeys(spec.also_positions) if p in POSITIONS and p not in b.positions]
+    if not b.positions and b.also_positions:
+        b.positions, b.also_positions = b.also_positions, []
+    b.experience_leagues = [lg for lg in dict.fromkeys(spec.experience_leagues) if lg in LEAGUES]
+    if spec.experience_min_minutes:
+        b.experience_minutes = int(spec.experience_min_minutes)
+    b.penalty_taker = bool(spec.penalty_taker)
     b.side, b.side_strict = spec.side, bool(spec.side and spec.side_only)
     for beat in spec.must_beat:
         hit = service.find(beat.player)
@@ -436,34 +566,45 @@ def profile(b: Brief, service) -> Tuple[RoleProfile, Optional[np.ndarray]]:
     retrieval target and (blended with a named role) the ranking weights, so 'output
     like his' means more of what he does most. Otherwise the role's weights, reweighted."""
     scales = metric_scales(service.in_latest_season(service.ps))
-    mult = np.array([b.emphasis.get(m, 1.0) for m in METRICS])
+    emph = np.array([b.emphasis.get(m, 0.0) for m in METRICS])
+    emph = emph / emph.sum() if emph.sum() > 0 else None
     role = ROLES[b.role] if b.role else None
 
+    def with_emphasis(w: np.ndarray) -> np.ndarray:
+        w = w / max(w.sum(), 1e-9)
+        return w if emph is None else (1 - EMPHASIS_SHARE) * w + EMPHASIS_SHARE * emph
+
     if b.replace is not None:
-        own = style_vector({m: float(b.replace[f"{m}_p90"]) for m in METRICS}, scales)
+        ref = service.in_latest_season(service.ps)
+        per90 = {m: float(b.replace[f"{m}_p90"]) for m in METRICS}
+        own = style_vector(per90, scales, group_centres(ref).get(b.replace["group"]))
+        # rank on what he does MORE than a typical player in his position; if he is below
+        # average at everything, fall back to the plain shape of his output
         weights = np.clip(own, 0, None)
+        if weights.sum() < 0.3:
+            weights = np.clip(style_vector(per90, scales), 0, None)
         if role is not None:
             rw = np.array([role.weights.get(m, 0.0) for m in METRICS])
             weights = 0.5 * weights / max(weights.sum(), 1e-9) + 0.5 * rw / rw.sum()
-        weights = weights * mult
-        target = own * mult
+        weights = with_emphasis(weights)
+        target = own if emph is None else own + emph / np.linalg.norm(emph)
         groups = tuple(dict.fromkeys((b.replace["group"],) + (role.groups if role is not None else ())))
         label = f"{b.replace['name']}-like" + (f" {role.label.lower()}" if role else "")
     else:
         if role is None and (b.positions or b.emphasis):
             # a position without a role: its default role, so the search always has a profile
             role = ROLES[POSITION_ROLE.get(b.positions[0] if b.positions else "", "complete_forward")]
-            if b.positions and b.positions[0] == "winger" and b.emphasis.get("npxG", 1) > 1:
+            if b.positions and b.positions[0] == "winger" and b.emphasis.get("npxG"):
                 role = ROLES["inside_forward"]
         if role is None:
             raise ValueError("Say what kind of player: a position (winger, centre-back...), a style, or a player "
                              "to replace or compare with. Goalkeepers are not covered by the free data.")
-        weights = np.array([role.weights.get(m, 0.0) for m in METRICS]) * mult
-        target = None if not b.emphasis else weights
+        weights = with_emphasis(np.array([role.weights.get(m, 0.0) for m in METRICS]))
+        target = None if emph is None else weights
         groups, label = role.groups, role.label
     positions = b.positions or ROLE_POSITIONS.get(b.role or "", [])
     if positions:
-        groups = groups_for(positions)
+        groups = groups_for(list(positions) + [p for p in b.also_positions if p not in positions])
     weights = weights / max(weights.sum(), 1e-9)
     if target is not None:
         target = target / max(np.linalg.norm(target), 1e-9)
@@ -483,11 +624,15 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
     subs = {s for p in positions for s in POSITIONS[p]}
     if b.side and b.side_strict:
         subs = (subs & set(SIDES[b.side])) or set(SIDES[b.side])
+    also = {s for p in b.also_positions for s in POSITIONS[p]}
     excl_ids = ([b.replace["us_id"]] if b.replace is not None else []) + [p["us_id"] for p, _ in b.beat]
     df = service.candidates(prof, n=pool_n, to_team=b.to_team, max_age=b.max_age,
                             min_age=b.min_age, max_value_eur=b.max_value_eur, min_minutes=b.min_minutes,
                             leagues=b.leagues, exclude=exclude, exclude_ids=excl_ids, target=target,
-                            sub_positions=subs or None,
+                            sub_positions=subs or None, also_positions=also or None,
+                            min_also_share=ALSO_SHARE,
+                            experience=(b.experience_leagues, b.experience_minutes) if b.experience_leagues else None,
+                            penalty_taker=b.penalty_taker,
                             exclude_teams=[b.to_team] if b.to_team and b.exclude_own_club else ())
     bars = []                                  # (label, metric, per-90 bar) from players to out-produce
     for p, m in b.beat:

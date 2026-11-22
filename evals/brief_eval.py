@@ -84,15 +84,24 @@ def reading_checks(b: briefs.Brief, expect: Dict) -> List[Check]:
     if "emphasis" in expect:
         want = {briefs.EMPHASIS_KEYS[e] for e in expect["emphasis"]}
         check("emphasis", want <= set(b.emphasis_labels), f"read {b.emphasis_labels}")
+    if "also_positions" in expect:
+        check("also plays", set(expect["also_positions"]) <= set(b.also_positions), f"read {b.also_positions}")
+    if "experience" in expect:
+        check("league experience", set(b.experience_leagues) == set(expect["experience"]), f"read {b.experience_leagues}")
+    if "penalty_taker" in expect:
+        check("penalty taker", b.penalty_taker == expect["penalty_taker"], f"read {b.penalty_taker}")
+    if "no_leagues_filter" in expect:
+        check("no league filter", not b.leagues, f"read {b.leagues}")
     if "unmeasured_any" in expect:
         got = " ".join(b.unmeasured)
         check("flags unmeasurable asks", any(w in got for w in expect["unmeasured_any"]), f"read {b.unmeasured}")
     return out
 
 
-def result_checks(b: briefs.Brief, df: pd.DataFrame) -> List[Check]:
+def result_checks(b: briefs.Brief, df: pd.DataFrame, service=None) -> List[Check]:
     """Every returned player must satisfy the brief as read. Unknown values are not failures
-    (no Transfermarkt match, no age, no value) but are counted."""
+    (no Transfermarkt match, no age, no value) but are counted. Position is where he started over
+    the last two seasons when the build has lineups, else his Transfermarkt main position."""
     out: List[Check] = []
     if df.empty:
         return [("results returned", False, "empty list")]
@@ -107,7 +116,17 @@ def result_checks(b: briefs.Brief, df: pd.DataFrame) -> List[Check]:
         out.append((name, not bad.any(), detail))
 
     if allowed:
-        rule("position (Transfermarkt)", sub.notna() & ~sub.isin(allowed), int(sub.isna().sum()))
+        share = df["position_share"] if "position_share" in df else pd.Series(float("nan"), index=df.index)
+        by_lineups = share.notna() & (share < 0.5)
+        by_main = share.isna() & sub.notna() & ~sub.isin(allowed | {s for p in b.also_positions for s in POSITIONS[p]})
+        rule("position (recent starts, else Transfermarkt)", by_lineups | by_main, int((share.isna() & sub.isna()).sum()))
+    if b.also_positions and "also_share" in df:
+        rule("also plays " + "/".join(b.also_positions), df["also_share"].notna() & (df["also_share"] < briefs.ALSO_SHARE))
+    if b.experience_leagues and service is not None:
+        rule(f"{b.experience_minutes}+ minutes in " + "/".join(b.experience_leagues),
+             service.league_minutes(df["us_id"], b.experience_leagues) < b.experience_minutes)
+    if b.penalty_taker and "pens" in df:
+        rule("took 2+ penalties", df["pens"].notna() & (df["pens"] < 2))
     if b.min_age is not None:
         rule("min age", df["age"].notna() & (df["age"] < b.min_age))
     if b.max_age is not None:
@@ -115,10 +134,12 @@ def result_checks(b: briefs.Brief, df: pd.DataFrame) -> List[Check]:
     if b.max_value_eur is not None:
         v = df["market_value_eur"]
         rule("budget", v.notna() & (v > b.max_value_eur), int(v.isna().sum()))
+    now_lg = df["current_league"] if "current_league" in df else df["league"]
+    now_club = df["current_club"] if "current_club" in df else df["team"]
     if b.leagues:
-        rule("leagues", ~df["league"].isin(b.leagues))
+        rule("leagues (current club)", ~now_lg.isin(b.leagues))
     if b.to_team and b.exclude_own_club:
-        rule("not already at the club", df["team"] == b.to_team)
+        rule("not already at the club", (df["team"] == b.to_team) | (now_club == b.to_team))
     rule("minutes", df["minutes"] < b.min_minutes)
     for name, m, bar in b.bars:
         if b.note:            # nobody reached the bar; the list is the closest, by design
@@ -163,7 +184,7 @@ def main(argv=None) -> None:
         if c["expect"].get("no_search"):      # e.g. goalkeepers: the right answer is to refuse
             res = [("declines what the data cannot do", bool(err), err or f"returned {len(df)} players")]
         else:
-            res = result_checks(b, df) if not err else [("search ran", False, err)]
+            res = result_checks(b, df, service) if not err else [("search ran", False, err)]
         rows.append({"id": c["id"], "read_ok": sum(ok for _, ok, _ in read), "read_n": len(read),
                      "res_ok": sum(ok for _, ok, _ in res), "res_n": len(res), "n": len(df)})
         lines += [f"### {c['id']}", "", f"> {c['text']}", "", f"Reading ({b.parser}): " + " | ".join(b.describe()), ""]
