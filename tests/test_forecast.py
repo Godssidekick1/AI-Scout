@@ -373,7 +373,7 @@ def test_brief_parses_player_money_age_leagues_and_emphasis(service):
     assert b.replace["us_id"] == p["us_id"] and b.to_team == p["team"]
     assert b.max_value_eur == 30e6 and b.max_age == p["age"] - 1          # 30m is money, not an age
     assert "premier_league" not in b.leagues and len(b.leagues) == 4
-    assert b.emphasis["xGBuildup"] == 0.6 and "in the air" in b.unmeasured
+    assert b.emphasis["xGBuildup"] == 0.6 and "aerial ability" in b.emphasis_labels and not b.unmeasured
 
     b = brief.parse("creative winger u21 from serie a, hidden gems, budget EUR 5m", service)
     assert (b.role, b.max_age, b.leagues, b.sort, b.max_value_eur) == ("creative_winger", 21, ["serie_a"], "value", 5e6)
@@ -421,9 +421,10 @@ def test_brief_reads_age_ranges_goal_targets_and_flags_soft_asks(service, monkey
     b = brief.parse("a goalscoring winger, who can track back, between 25-30, pacey and who can score 15+ goals "
                     "in a season for my team", service, replace=p["name"])
     assert (b.role, b.min_age, b.max_age, b.min_goals) == ("inside_forward", 25, 30, 15)
-    assert {"track back", "pace"} <= set(b.unmeasured)
+    assert "pace" in b.unmeasured and "defending" in b.emphasis_labels      # tracking back is measured now
     b2 = brief.parse("a cb good on the ball and reliable defensively, adaptable, can play any formation", service)
-    assert b2.min_minutes == 1800 and {"adaptab", "any formation", "defensive"} <= set(b2.unmeasured)
+    assert b2.min_minutes == 1800 and {"adaptab", "any formation"} <= set(b2.unmeasured)
+    assert {"defending", "build-up / progression"} <= set(b2.emphasis_labels)
     assert brief.parse("striker, 15-20 goals a season", service).min_age is None     # goals, not ages
 
     # an unreachable target shows the closest players instead of nothing
@@ -453,7 +454,7 @@ def test_llm_brief_is_checked_against_the_data(service, monkeypatch):
         return spec
     monkeypatch.setattr(llm, "structured", fake)
     b = brief.understand("a cb for them who is good on the ball, reliable, adaptable, under 40m", service)
-    assert b.parser == "Gemini" and b.replace["us_id"] == p["us_id"] and b.to_team == club
+    assert b.parser.startswith("Gemini") and b.replace["us_id"] == p["us_id"] and b.to_team == club
     assert b.max_age == p["age"] - 1 and b.max_value_eur == 40e6 and "premier_league" not in b.leagues
     assert b.emphasis["xGBuildup"] == 0.6 and b.unmeasured == ["defending", "versatility"]
     df, him, _ = brief.search(b, service, n=3)

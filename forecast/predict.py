@@ -32,7 +32,7 @@ import pandas as pd
 
 from forecast.config import LEAGUES, METRICS, POSITION_SHORT, season_label
 from forecast.model import history_features
-from forecast.roles import ROLES, role_from_text
+from forecast.roles import DEF_KEYS, ROLES, role_from_text
 from forecast.service import ForecastService, artifact_path
 from forecast.table import team_totals
 
@@ -159,11 +159,23 @@ def cmd_role(service: ForecastService, args) -> None:
         val = f"{r['market_value_eur'] / 1e6:.1f}" if pd.notna(r["market_value_eur"]) else "?"
         gap = f"{r['value_gap']:+.1f}" if pd.notna(r["value_gap"]) else "?"
         print(f"{i + 1:>3}  {str(r['name'])[:23]:<24}{str(r['team'])[:19]:<20}{age:>4}{r['minutes']:>6.0f}"
-              f"{r['role_score']:>6.2f}{gap:>6}{val:>7}" + "".join(f"{r[f'pred_{m}']:>10.2f}" for m in shown))
+              f"{r['role_score']:>6.2f}{gap:>6}{val:>7}" + "".join(f"{metric_value(r, m):>10}" for m in shown))
     print("\nrole = projected fit to the role next season (0 = average player in it, in standard deviations). "
           "gap = value gap: positive means cheap for that projected output (the hidden-talent signal).\n"
           f"Metric columns are projected per-90 next season. Details for one player:  "
           f"python -m forecast.predict player \"{df.iloc[0]['name']}\"" + (f" --to \"{args.to}\"" if args.to else ""))
+
+
+def metric_value(r, m: str) -> str:
+    """Projected per-90 for a model metric; the recent observed rate for a defensive one."""
+    if m in DEF_KEYS:
+        from forecast.roles import def_column
+        col, _ = def_column(m)
+        if float(r.get("def_minutes_used", 0) or 0) <= 0 or pd.isna(r.get(col, np.nan)):
+            return "-"
+        v = float(r[col])
+        return f"{v:.0%}" if m.endswith("_pct") else f"{v:.2f}"
+    return f"{r[f'pred_{m}']:.2f}"
 
 
 LEAGUE_SHORT = {"premier_league": "EPL", "la_liga": "LaLiga", "bundesliga": "Bund", "serie_a": "SerieA", "ligue_1": "L1"}
@@ -246,7 +258,7 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
             return f"{v:>8.0%}" if c.endswith("share") else f"{v:>8.0f}"
         return (f"{i:>3}  {str(r['name'])[:22]:<23}{club:<19}{LEAGUE_SHORT.get(lg, str(lg))[:6]:<7}"
                 f"{pos:<4}{age:>4}{r['minutes']:>6.0f}{sty:>6}{score:>7}{gap:>6}{val:>7}"
-                + "".join(f"{r[f'pred_{m}']:>10.2f}" for m in shown)
+                + "".join(f"{metric_value(r, m):>10}" for m in shown)
                 + "".join(f"{r[c]:>8.1f}" if c in r and pd.notna(r[c]) else f"{'':>8}" for c in extra)
                 + "".join(fact(c) for c, _ in facts))
 
@@ -261,7 +273,10 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
              if him is not None else "score = projected output in this profile next season" + at
              + " (0 = average in the role), ")
           + "in standard deviations. gap = value gap: positive = cheap for that output. "
-            "Metric columns are projected per-90 next season. pos = where he started most over the last two "
+            "Metric columns are projected per-90 next season"
+          + ("; defensive columns (" + ", ".join(m for m in shown if m in DEF_KEYS) + ") are his observed rates over "
+             "the last three covered seasons, shrunk toward his position's average ('-' = no defensive data for him)"
+             if any(m in DEF_KEYS for m in shown) else "") + ". pos = where he started most over the last two "
             "seasons (Transfermarkt lineups)."
           + (" * = moved since the last season in the data; club and league are his current ones (Transfermarkt), "
              "his stats are from his old club." if "moved" in df and df["moved"].any() else "")

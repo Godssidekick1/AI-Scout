@@ -14,7 +14,8 @@ LeagueKey = Literal["premier_league", "la_liga", "bundesliga", "serie_a", "ligue
 
 
 RoleKey = Literal["poacher", "complete_forward", "inside_forward", "creative_winger", "playmaker",
-                  "box_to_box", "deep_playmaker", "attacking_fullback", "ball_playing_cb"]
+                  "box_to_box", "deep_playmaker", "attacking_fullback", "ball_playing_cb", "stopper_cb",
+                  "defensive_fullback", "ball_winner", "target_forward", "pressing_forward"]
 
 
 class SearchConstraints(BaseModel):
@@ -34,7 +35,8 @@ class SearchConstraints(BaseModel):
                                        "('for Man City'). Null if not stated.")
 
 
-EmphasisKey = Literal["build_up", "chance_creation", "goal_threat", "shooting", "involvement"]
+EmphasisKey = Literal["build_up", "chance_creation", "goal_threat", "shooting", "involvement",
+                      "defending", "aerial", "ball_winning"]
 PositionKey = Literal["winger", "striker", "attacking_mid", "central_mid", "defensive_mid", "fullback", "centre_back"]
 
 
@@ -70,11 +72,17 @@ class BriefSpec(BaseModel):
                                        "is Arsenal'). Null if not stated.")
     role: Optional[RoleKey] = Field(default=None, description="Closest role profile. A goalscoring or inside winger is "
                                     "inside_forward; a creative/crossing winger is creative_winger; a ball-playing or "
-                                    "Stones-type centre-back is ball_playing_cb; a holding/deep passer is deep_playmaker.")
+                                    "Stones-type centre-back is ball_playing_cb; a dominant, no-nonsense or Terry-type centre-back is "
+                                    "stopper_cb; a holding/deep passer is deep_playmaker; a ball-winning or destroyer "
+                                    "midfielder is ball_winner; a target man is target_forward; a striker who presses "
+                                    "from the front is pressing_forward; a full-back valued for defending is "
+                                    "defensive_fullback.")
     emphasis: List[EmphasisKey] = Field(default_factory=list, description="Measurable qualities stressed: build_up "
                                         "(progressive passing, on the ball, distribution), chance_creation (creative, "
                                         "assists, key passes), goal_threat (goals, finishing), shooting (shot volume), "
-                                        "involvement (link-up, combination play).")
+                                        "involvement (link-up, combination play), defending (tackling, interceptions, tracking back, "
+                                        "reliable defensively, holds his ground), aerial (in the air, heading), "
+                                        "ball_winning (pressing, work rate, winning the ball back).")
     min_age: Optional[int] = Field(default=None, description="Minimum age in years. 'between 25-30' means 25.")
     max_age: Optional[int] = Field(default=None, description="Maximum age in years. 'under 25' means 24, 'u21' means 21.")
     younger_than_replaced: bool = Field(default=False, description="True when the user wants someone younger than the "
@@ -98,9 +106,9 @@ class BriefSpec(BaseModel):
     min_assists: Optional[float] = Field(default=None, description="League assists per season the user requires.")
     hidden_talent: bool = Field(default=False, description="True for hidden, unknown, undervalued, bargain or "
                                 "'not the obvious names' requests.")
-    unmeasured: List[str] = Field(default_factory=list, description="Asks the six stats cannot measure, as short "
-                                  "phrases: defending, tackling, aerials, pace, tracking back, work rate, versatility, "
-                                  "leadership, physicality, goalkeeping, character.")
+    unmeasured: List[str] = Field(default_factory=list, description="Asks the data cannot measure, as short "
+                                  "phrases: pace, versatility, leadership, physicality, dribbling, goalkeeping, "
+                                  "character. Defending, aerials and work rate ARE measured: use emphasis.")
 
 
 class CharacterAnalysis(BaseModel):

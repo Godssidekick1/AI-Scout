@@ -24,7 +24,8 @@ import pandas as pd
 from config import settings
 from forecast.config import METRICS
 from forecast.model import MinutesModel, ProjectionModel, history_features
-from forecast.roles import ROLES, RoleProfile, group_centres, metric_scales, role_scores, style_vector, target_vector, value_gap
+from forecast.roles import (ROLES, RoleProfile, group_centres, metric_scales, role_scores, style_vector,
+                            target_vector, uses_defensive, value_gap)
 from forecast.table import expected_share, team_totals
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,31 @@ class ForecastService:
         out["pens"] = self.recent_penalties(out["us_id"]).to_numpy()
         return out
 
+    # ── defensive profile ─────────────────────────────────────
+    def defensive_profile(self) -> pd.DataFrame:
+        """Recent observed defensive rates for every latest-season player (`def_*` columns,
+        `def_minutes_used` = 0 when uncovered). Empty frame for a model built before the
+        defensive data existed."""
+        cached = self.__dict__.get("_def_profile")
+        if cached is not None:
+            return cached
+        from forecast.data.defensive import recent_rates
+        latest = self.in_latest_season(self.current())
+        prof = recent_rates(self.ps, latest, seasons_back=3) if "def_minutes" in self.ps else pd.DataFrame(
+            {"us_id": latest["us_id"]})
+        self.__dict__["_def_profile"] = prof
+        return prof
+
+    def with_defensive(self, df: pd.DataFrame) -> pd.DataFrame:
+        prof = self.defensive_profile()
+        extra = [c for c in prof.columns if c != "us_id" and c not in df]
+        return df.merge(prof[["us_id", *extra]], on="us_id", how="left") if extra else df
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state.pop("_def_profile", None)
+        return state
+
     # ── retrieval ─────────────────────────────────────────────
     def _style_vectors(self, rows: pd.DataFrame) -> np.ndarray:
         ref = self.in_latest_season(self.ps)
@@ -306,14 +332,22 @@ class ForecastService:
         if cur.empty:
             return pd.DataFrame()
 
-        pool = self._retrieve(cur, role, max(n * 2, 40), target)
+        # Style retrieval looks only at attacking output; for a role that leans on defending, rank
+        # the whole filtered pool instead so good defenders aren't cut before scoring.
+        if uses_defensive(role):
+            k = len(cur) if target is None else max(n * 8, 200)
+        else:
+            k = max(n * 2, 40)
+        pool = self._retrieve(cur, role, min(k, 800), target)
         if pool.empty:
             return pd.DataFrame()
 
-        proj = self.project(pool.drop(columns=["style_similarity"]), to_team)
-        reference = self.in_latest_season(self.ps)
+        proj = self.with_defensive(self.project(pool.drop(columns=["style_similarity"]), to_team))
+        reference = self.with_defensive(self.in_latest_season(self.ps))
         proj["role_score"] = np.round(role_scores(proj, role, reference), 2)
         proj["style_similarity"] = pool["style_similarity"].to_numpy()
+        if target is None and not any(m in METRICS for m in role.weights):
+            proj["style_similarity"] = np.nan      # a purely defensive profile has no attacking style to match
         proj["value_gap"] = np.round(value_gap(proj["role_score"].to_numpy(float),
                                                proj["market_value_eur"].to_numpy(float)), 2)
         if sub_positions:
