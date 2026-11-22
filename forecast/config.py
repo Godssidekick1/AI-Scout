@@ -8,6 +8,23 @@ from typing import Dict, Optional, Tuple
 # Season-total columns from Understat. The model predicts each one per 90.
 METRICS: Tuple[str, ...] = ("npxG", "xA", "shots", "key_passes", "xGChain", "xGBuildup")
 
+# Defensive / duel / progression metrics from forecast/data/defensive.py. These are observed
+# per-90 rates (`{m}_p90`), not projected by the model: free coverage starts in 2017-18 (2008-09
+# for the Premier League), too short for the season-pair model, so roles use recent observed
+# rates shrunk toward the position mean.
+DEF_METRICS: Tuple[str, ...] = ("tackles", "interceptions", "tkl_int", "blocks", "clearances", "aerials_won",
+                                "aerials", "recoveries", "duels_won", "prog_passes", "prog_carries")
+# success ratios: name -> (numerator, denominator) over the season totals
+DEF_RATIOS: Dict[str, Tuple[str, str]] = {"aerial_win_pct": ("aerials_won", "aerials"),
+                                          "tackle_win_pct": ("tackles_won", "tackles"),
+                                          "duel_win_pct": ("duels_won", "duels")}
+DEF_LABELS: Dict[str, str] = {
+    "tackles": "tackles", "interceptions": "interceptions", "tkl_int": "tackles + interceptions",
+    "blocks": "blocks", "clearances": "clearances", "aerials_won": "aerials won", "aerials": "aerial duels",
+    "recoveries": "ball recoveries", "duels_won": "duels won", "prog_passes": "progressive passes",
+    "prog_carries": "progressive carries", "aerial_win_pct": "aerial win %", "tackle_win_pct": "tackle win %",
+    "duel_win_pct": "duel win %"}
+
 # v3 scope: the big five. Keys match data_sources.understat_source.UNDERSTAT_LEAGUES.
 LEAGUES: Tuple[str, ...] = ("premier_league", "la_liga", "bundesliga", "serie_a", "ligue_1")
 REFERENCE_LEAGUE = "premier_league"   # league effects are measured relative to this one

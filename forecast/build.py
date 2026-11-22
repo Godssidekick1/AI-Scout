@@ -35,7 +35,41 @@ logger = logging.getLogger("forecast.build")
 RESULTS = Path(__file__).resolve().parent.parent / "evals" / "results"
 
 
-def load_real(seasons: List[int], elo_source: str = "auto") -> Tuple[pd.DataFrame, Dict[str, float]]:
+DEF_REPORT: Dict[str, str] = {}
+
+
+def add_defensive(ps: pd.DataFrame, us: pd.DataFrame, seasons: List[int]) -> pd.DataFrame:
+    """Join defensive/duel/progression rates (forecast/data/defensive.py) onto the player-season
+    table. Any failure leaves the table as it was: the model doesn't depend on these columns."""
+    from forecast.data import defensive
+    try:
+        rows, cov = defensive.load_all(seasons)
+        agg = us.groupby(["us_id", "league", "season"], as_index=False).agg(
+            name=("name", "first"), team=("team", lambda t: " / ".join(dict.fromkeys(t))), minutes=("minutes", "sum"))
+        born = (ps["season"] - ps["age"].round()).groupby(ps["us_id"]).median()   # from Transfermarkt
+        agg["birth_year"] = agg["us_id"].map(born)
+        linked = defensive.link(rows, agg)
+        ps = defensive.add_rates(ps, defensive.player_season_table(linked))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Defensive data skipped: %s", e)
+        DEF_REPORT["text"] = f"Defensive data: not loaded ({str(e)[:160]})."
+        return ps
+    table = defensive.coverage_table(cov, sorted(set(seasons)))
+    linked_n = int(linked["us_id"].notna().sum())
+    big = linked[linked["minutes"] >= 900]
+    rate = float(big["us_id"].notna().mean()) if len(big) else 0.0
+    lines = ["## Defensive data coverage", "",
+             "PL = premierleague.com, SA = legaseriea.it, FB = FBref big-five copy, - = none. "
+             f"Linked {linked_n} of {len(linked)} source rows to Understat ({rate:.0%} of players with 900+ minutes).",
+             "", backtest.to_markdown(table.rename(columns=lambda c: str(c))), ""]
+    bad = cov[cov["status"] != "ok"] if not cov.empty else cov
+    lines += [f"- {r['source']}: {r['status']}" for _, r in bad.iterrows()]
+    DEF_REPORT["text"] = "\n".join(lines)
+    return ps
+
+
+def load_real(seasons: List[int], elo_source: str = "auto",
+              defensive: bool = True) -> Tuple[pd.DataFrame, Dict[str, float]]:
     from forecast.data import clubelo, transfermarkt
     from forecast.data.understat_history import load_seasons
 
@@ -53,6 +87,8 @@ def load_real(seasons: List[int], elo_source: str = "auto") -> Tuple[pd.DataFram
     team_elo = clubelo.team_elo_table(teams, snapshots)
 
     ps = player_seasons(us, players, us_to_tm, team_elo)
+    if defensive:
+        ps = add_defensive(ps, us, seasons)
     latest_values = transfermarkt.value_at(valuations, dt.date.today().isoformat())
     values = {u: latest_values.get(t) for u, t in us_to_tm.items() if t is not None and t in latest_values}
     return ps, values
@@ -108,6 +144,9 @@ def check_sources() -> bool:
             status = f"UNREACHABLE ({type(e).__name__})"
         all_ok &= status == "ok"
         print(f"{name:24s} {status}")
+    print("\nDefensive data (optional; the build continues without any of these):")
+    from forecast.data import defensive
+    defensive.check()
     return all_ok
 
 
@@ -115,6 +154,8 @@ def load_synthetic(seed: int = 7) -> Tuple[pd.DataFrame, Dict[str, float]]:
     from forecast import synthetic
     us, tm, us_to_tm, team_elo = synthetic.generate(seed=seed)
     ps = player_seasons(us, tm, us_to_tm, team_elo)
+    from forecast.data import defensive
+    ps = defensive.add_rates(ps, defensive.synthetic_table(ps, seed))
     rng = np.random.default_rng(seed)
     values = {u: float(np.exp(rng.normal(16, 1))) for u in ps["us_id"].unique()}
     return ps, values
@@ -140,6 +181,7 @@ def report(res: Dict[str, pd.DataFrame], model: ProjectionModel, synthetic: bool
         lines += [f"## {title}", "", backtest.to_markdown(backtest.ladder_table(res["scores"], subset)), ""]
     lines += ["## 80% interval coverage (full model)", "",
               backtest.to_markdown(res["coverage"].set_index("metric"), 3), "",
+              *( [DEF_REPORT["text"], ""] if DEF_REPORT.get("text") else [] ),
               "## Minutes model", "", backtest.to_markdown(res["minutes"].set_index("season"), 1), "",
               "## Fitted coefficients (final model, relative effects)", ""]
     for m in METRICS:
@@ -155,6 +197,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--elo", choices=("auto", "clubelo", "results"), default="auto",
                     help="team ratings: ClubElo, Elo from match results, or ClubElo with results as fallback")
     ap.add_argument("--first-season", type=int, default=2014)
+    ap.add_argument("--no-defensive", action="store_true", help="skip the defensive/duel data sources")
     ap.add_argument("--test-seasons", type=int, default=4, help="how many recent completed seasons to test on")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -167,7 +210,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.synthetic:
         ps, values = load_synthetic()
     else:
-        ps, values = load_real(list(range(args.first_season, current + 1)), args.elo)
+        ps, values = load_real(list(range(args.first_season, current + 1)), args.elo, not args.no_defensive)
 
     pairs = season_pairs(ps)
     completed = pairs[pairs["target_season"] < current] if not args.synthetic else pairs

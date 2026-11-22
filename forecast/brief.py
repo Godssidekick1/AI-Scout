@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from forecast.config import LEAGUES, METRICS, POSITIONS, SIDES, groups_for
-from forecast.roles import ROLES, RoleProfile, metric_scales, role_from_text, style_vector
+from forecast.roles import DEF_KEYS, ROLES, RoleProfile, metric_scales, role_from_text, style_vector
 
 LEAGUE_WORDS: Dict[str, Tuple[str, ...]] = {
     "premier_league": ("premier league", "epl", "england", "english"),
@@ -37,23 +37,34 @@ LEAGUE_WORDS: Dict[str, Tuple[str, ...]] = {
 }
 
 # description words -> metric multipliers
+# description words -> weights. For the model's METRICS a value is a multiplier on the role's weight;
+# for defensive metrics (DEF_KEYS: observed rates from forecast/data/defensive.py) it is a weight
+# added to the profile, since most attacking roles start with none.
 EMPHASIS: List[Tuple[str, Tuple[str, ...], Dict[str, float]]] = [
     ("build-up / progression", ("progressive", "progression", "passer", "passing", "build-up", "buildup",
                                 "build up", "ball-playing", "progress", "possession", "steps into", "ball playing", "distribut", "deep-lying", "carries",
                                 "carrier", "on the ball"),
-     {"xGBuildup": 2.0, "xGChain": 1.5}),
+     {"xGBuildup": 2.0, "xGChain": 1.5, "prog_passes": 0.6, "prog_carries": 0.4}),
     ("chance creation", ("creative", "creator", "creat", "assist", "playmak", "vision", "key pass", "chances for"),
      {"xA": 2.0, "key_passes": 2.0}),
     ("goal threat", ("goals", "goal threat", "goalscor", "scorer", "scores", "into the box", "scoring", "finisher", "clinical", "box presence", "poach"),
      {"npxG": 2.0, "shots": 1.5}),
     ("shooting volume", ("shooter", "shots", "shoots"), {"shots": 2.0}),
     ("involvement", ("involved", "link-up", "link up", "combination", "combines"), {"xGChain": 2.0}),
+    ("defending", ("defensive", "defending", "defend", "tackl", "intercept", "track back", "tracks back",
+                   "tracking back", "hold his ground", "holds his ground", "solid at the back", "stopper", "blocks",
+                   "clearances", "duel", "1v1 defend", "one-on-one defend"),
+     {"tkl_int": 0.45, "tackle_win_pct": 0.2, "blocks": 0.15, "clearances": 0.2}),
+    ("aerial ability", ("aerial", "in the air", "header", "heading", "headers", "dominant in the air"),
+     {"aerials_won": 0.55, "aerial_win_pct": 0.45}),
+    ("ball winning / work rate", ("pressing", "presser", "presses", "ball-winn", "ball winn", "wins the ball",
+                                  "wins it back", "recover", "work rate", "hard-working", "hard working", "workhorse",
+                                  "tenacious", "combative", "engine"),
+     {"recoveries": 0.5, "tkl_int": 0.35, "duels_won": 0.15}),
 ]
-UNMEASURED = ("track back", "tracks back", "tracking back", "work rate", "hard-working", "hard working", "adaptab",
-              "versatil", "any formation", "formations", "any system", "multiple positions", "two-footed", "leader",
-              "mentality", "attitude", "tackl", "intercept", "aerial", "header", "defensive", "defending", "duel",
-              "pace", "fast",
-              "quick", "physical", "tall", "in the air", "pressing", "work rate", "saves", "shot-stopp", "keeper", "goalkeeper")
+UNMEASURED = ("adaptab", "versatil", "any formation", "formations", "any system", "multiple positions", "two-footed",
+              "leader", "mentality", "attitude", "pace", "pacey", "fast", "quick", "physical", "tall", "saves",
+              "shot-stopp", "keeper", "goalkeeper", "dribbl")
 HIDDEN = ("hidden", "unknown", "under the radar", "under-the-radar", "bargain", "undervalued", "underrated",
           "cheap", "value for money", "gem", "unexpected")
 CLUB_ALIASES = {"man city": "Manchester City", "man utd": "Manchester United", "man united": "Manchester United",
@@ -254,9 +265,7 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     b.role = role_from_text(re.sub(r"forward (?:pass|run|carr)\w*", " ", t))
     for label, cues, mult in EMPHASIS:
         if any(_has(t, c) for c in cues):
-            b.emphasis_labels.append(label)
-            for k, v in mult.items():
-                b.emphasis[k] = max(b.emphasis.get(k, 1.0), v)
+            add_emphasis(b, label)
     b.unmeasured = sorted({c for c in UNMEASURED if _has(t, c)})
     if any(_has(t, c) for c in HIDDEN):
         b.sort = "value"
@@ -310,7 +319,10 @@ POSITION_ROLE = {"winger": "creative_winger", "striker": "complete_forward", "at
                  "central_mid": "box_to_box", "defensive_mid": "deep_playmaker", "fullback": "attacking_fullback",
                  "centre_back": "ball_playing_cb"}
 ROLE_POSITIONS = {"creative_winger": ["winger"], "inside_forward": ["winger"], "poacher": ["striker"],
-                  "complete_forward": ["striker"], "attacking_fullback": ["fullback"], "ball_playing_cb": ["centre_back"]}
+                  "complete_forward": ["striker"], "attacking_fullback": ["fullback"], "ball_playing_cb": ["centre_back"],
+                  "stopper_cb": ["centre_back"], "defensive_fullback": ["fullback"],
+                  "ball_winner": ["defensive_mid", "central_mid"], "target_forward": ["striker"],
+                  "pressing_forward": ["striker"]}
 
 
 def apply_squad_role(b: Brief, upside: bool = False) -> None:
@@ -327,11 +339,26 @@ def apply_squad_role(b: Brief, upside: bool = False) -> None:
 
 
 EMPHASIS_KEYS = {"build_up": "build-up / progression", "chance_creation": "chance creation",
-                 "goal_threat": "goal threat", "shooting": "shooting volume", "involvement": "involvement"}
+                 "goal_threat": "goal threat", "shooting": "shooting volume", "involvement": "involvement",
+                 "defending": "defending", "aerial": "aerial ability", "ball_winning": "ball winning / work rate"}
+
+
+def add_emphasis(b: "Brief", label: str) -> None:
+    """Record an emphasis: multipliers for model metrics, added weights for defensive ones."""
+    if label in b.emphasis_labels:
+        return
+    b.emphasis_labels.append(label)
+    for lbl, _, mult in EMPHASIS:
+        if lbl == label:
+            for k, v in mult.items():
+                b.emphasis[k] = max(b.emphasis.get(k, 0.0 if k in DEF_KEYS else 1.0), v)
 
 LLM_PROMPT = """You turn a football scout's request into search filters for a model of the big five leagues.
-The model measures only six per-90 stats: npxG, xA, shots, key passes, xGChain, xGBuildup. Anything else the
-scout asks for (defending, aerials, pace, work rate, versatility, character...) goes in `unmeasured`.
+It projects six per-90 stats (npxG, xA, shots, key passes, xGChain, xGBuildup) and also has observed defensive
+data: tackles, interceptions, blocks, clearances, aerial duels, ball recoveries, duels, progressive passes and
+carries. Defending, tackling, tracking back or holding ground -> emphasis defending; aerials, heading -> aerial;
+pressing, work rate, winning the ball back -> ball_winning. Only what none of these measure (pace, versatility,
+physicality, leadership, character, goalkeeping...) goes in `unmeasured`.
 Fill only what the request states or clearly implies; leave the rest empty. Never invent a budget, age or club."""
 
 
@@ -380,12 +407,7 @@ def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> B
         b.to_team = b.replace["team"]
     b.role = spec.role
     for key in spec.emphasis:
-        label = EMPHASIS_KEYS[key]
-        b.emphasis_labels.append(label)
-        for lbl, _, mult in EMPHASIS:
-            if lbl == label:
-                for k, v in mult.items():
-                    b.emphasis[k] = max(b.emphasis.get(k, 1.0), v)
+        add_emphasis(b, EMPHASIS_KEYS[key])
     b.min_age = float(spec.min_age) if spec.min_age else None
     b.max_age = float(spec.max_age) if spec.max_age else None
     if spec.younger_than_replaced and b.max_age is None and b.replace is not None and pd.notna(b.replace.get("age")):
@@ -407,7 +429,10 @@ def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> B
         if hit is None:
             b.beat_query.append(beat.player)
         else:
-            b.beat.append((hit, BEAT_METRIC[beat.quality]))
+            if beat.quality in BEAT_METRIC:
+                b.beat.append((hit, BEAT_METRIC[beat.quality]))
+            else:
+                add_emphasis(b, EMPHASIS_KEYS[beat.quality])
     b.squad_role = spec.squad_role
     apply_squad_role(b, upside=spec.upside)
     if spec.min_minutes:                       # an explicit minutes ask wins over the squad-role default
@@ -416,7 +441,7 @@ def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> B
 
 
 BEAT_METRIC = {"goal_threat": "npxG", "chance_creation": "xA", "shooting": "shots", "build_up": "xGBuildup",
-               "involvement": "xGChain"}
+               "involvement": "xGChain"}    # defensive qualities aren't projected: they become an emphasis
 
 
 def profile(b: Brief, service) -> Tuple[RoleProfile, Optional[np.ndarray]]:
@@ -457,10 +482,60 @@ def profile(b: Brief, service) -> Tuple[RoleProfile, Optional[np.ndarray]]:
     weights = weights / max(weights.sum(), 1e-9)
     if target is not None:
         target = target / max(np.linalg.norm(target), 1e-9)
-    prof = RoleProfile("custom", label, tuple(groups),
-                       {m: round(float(w), 3) for m, w in zip(METRICS, weights) if w > 0.02},
+
+    # Defensive block (observed rates, not projected): the role's own defensive weights, the
+    # replaced player's defensive strengths, and any defensive emphasis, each a share of the total.
+    role_def = {m: w for m, w in (role.weights.items() if role is not None else ()) if m in DEF_KEYS}
+    share = sum(role_def.values()) * (0.5 if b.replace is not None else 1.0)
+    final = {m: float(w) * (1 - share) for m, w in zip(METRICS, weights)}
+    for m, w in role_def.items():
+        final[m] = final.get(m, 0.0) + w * (0.5 if b.replace is not None else 1.0)
+    if b.replace is not None:
+        for m, w in own_defensive(b.replace, service).items():
+            final[m] = final.get(m, 0.0) + w
+    for emph in b.emphasis_labels:
+        mult = next((mm for lbl, _, mm in EMPHASIS if lbl == emph), {})
+        add = {m: v for m, v in mult.items() if m in DEF_KEYS}
+        tot = sum(add.values())
+        for m, v in add.items():
+            final[m] = final.get(m, 0.0) + DEF_EMPHASIS_SHARE * v / tot
+    total = sum(final.values()) or 1.0
+    prof = RoleProfile("custom", label_of(label, b), tuple(groups),
+                       {m: round(w / total, 3) for m, w in final.items() if w / total > 0.02},
                        proxy=bool(role and role.proxy), note=role.note if role else "")
     return prof, target
+
+
+DEF_EMPHASIS_SHARE = 0.35          # weight one defensive emphasis adds, before renormalising
+OWN_DEF_SHARE = 0.3                # weight of a replaced defender's own defensive strengths
+OWN_DEF_METRICS = ("tkl_int", "aerials_won", "aerial_win_pct", "clearances", "blocks", "recoveries", "prog_passes")
+
+
+def label_of(label: str, b: Brief) -> str:
+    extra = [lbl for lbl in b.emphasis_labels if lbl in ("defending", "aerial ability", "ball winning / work rate")]
+    return label + (f" ({', '.join(extra)})" if extra else "")
+
+
+def own_defensive(player: pd.Series, service) -> Dict[str, float]:
+    """For a replaced defender or midfielder: the defensive metrics he is above average at for his
+    position, weighted by how far above (so 'replace Van Dijk' values aerials and clearances)."""
+    if player.get("group") not in ("CB", "FB", "CM") or not hasattr(service, "defensive_profile"):
+        return {}
+    from forecast.roles import def_column
+    prof = service.with_defensive(service.in_latest_season(service.ps))
+    me = prof[prof["us_id"] == player["us_id"]]
+    if me.empty or float(me["def_minutes_used"].iloc[0] if "def_minutes_used" in me else 0) <= 0:
+        return {}
+    ref = prof[(prof["group"] == player["group"]) & (prof.get("def_minutes_used", 0) > 0)]
+    z = {}
+    for m in OWN_DEF_METRICS:
+        col, _ = def_column(m)
+        if col in prof and ref[col].notna().sum() >= 10:
+            v = (float(me[col].iloc[0]) - ref[col].mean()) / (ref[col].std() or 1.0)
+            if np.isfinite(v) and v > 0.25:
+                z[m] = v
+    tot = sum(z.values())
+    return {m: OWN_DEF_SHARE * v / tot for m, v in z.items()} if tot else {}
 
 
 def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tuple[pd.DataFrame, Optional[pd.Series], RoleProfile]:
@@ -487,8 +562,12 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
     him = None
     if b.replace is not None:
         him = service.project(b.replace.to_frame().T.infer_objects(), b.to_team).iloc[0].copy()
-        him["role_score"] = round(float(role_scores(him.to_frame().T.infer_objects(), prof,
-                                                    service.in_latest_season(service.ps))[0]), 2)
+        him_row = service.with_defensive(him.to_frame().T.infer_objects())
+        him["role_score"] = round(float(role_scores(him_row, prof,
+                                                    service.with_defensive(service.in_latest_season(service.ps)))[0]), 2)
+        for c in him_row.columns:
+            if c.startswith("def_") and c not in him:
+                him[c] = him_row[c].iloc[0]
         him["proj_goals"] = round(float(him["pred_npxG"] * him["expected_minutes"] / 90), 1)
         him["proj_assists"] = round(float(him["pred_xA"] * him["expected_minutes"] / 90), 1)
     if not df.empty and thresholds:
