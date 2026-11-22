@@ -6,11 +6,10 @@ No API key needed — uses browser-like headers to bypass basic protections.
 """
 
 import re
-import httpx
 from bs4 import BeautifulSoup
 from typing import Dict, List, Optional
 import logging
-from data_sources.base_source import BaseSource
+from data_sources.base_source import BaseSource, http_request
 from data_sources.data_cache import DataCache
 
 logger = logging.getLogger(__name__)
@@ -42,17 +41,12 @@ class TransfermarktSource(BaseSource):
         if cached:
             return BeautifulSoup(cached.get("html", ""), "lxml")
 
-        try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                response = await client.get(url, headers=self.headers)
-                response.raise_for_status()
-                html = response.text
-                self.cache.set(cache_key, {"html": html})
-                return BeautifulSoup(html, "lxml")
-
-        except httpx.HTTPError as e:
-            logger.error(f"Transfermarkt fetch error for {url}: {e}")
+        response = await http_request("GET", url, headers=self.headers)
+        if response is None:
             return None
+        html = response.text
+        self.cache.set(cache_key, {"html": html})
+        return BeautifulSoup(html, "lxml")
 
     async def search_players(
         self,
@@ -89,9 +83,13 @@ class TransfermarktSource(BaseSource):
                 position_text = ""
                 team_text = ""
                 market_value = ""
+                age = None
 
                 for cell in cells:
                     text = cell.get_text(strip=True)
+                    classes = " ".join(cell.get("class", []))
+                    if "zentriert" in classes and text.isdigit() and 15 <= int(text) <= 45:
+                        age = int(text)
                     if cell.get("class") and "posrela" in " ".join(cell.get("class", [])):
                         pos_el = cell.select_one("tr:nth-of-type(2) td")
                         if pos_el:
@@ -103,6 +101,7 @@ class TransfermarktSource(BaseSource):
                     "name": player_name,
                     "position": position_text,
                     "team": team_text,
+                    "age": age,
                     "market_value_raw": market_value,
                     "market_value_eur": self._parse_market_value(market_value),
                     "profile_url": f"{self.BASE_URL}{player_url}" if player_url else "",
@@ -154,7 +153,11 @@ class TransfermarktSource(BaseSource):
                 label = rows[i].get_text(strip=True).lower()
                 value = rows[i + 1].get_text(strip=True)
 
-                if "contract" in label and "expires" in label:
+                if label.startswith("date of birth") or label.rstrip(":") == "age":
+                    age_match = re.search(r"\((\d{2})\)", value)
+                    if age_match:
+                        data["age"] = int(age_match.group(1))
+                elif "contract" in label and "expires" in label:
                     data["contract_end_date"] = value
                 elif "agent" in label:
                     data["agent"] = value

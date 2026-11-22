@@ -1,22 +1,27 @@
 """
 Understat Data Source
 =====================
-Scrapes Understat for xG, xA, and shot-level data.
-Uses Understat's internal JSON API endpoints.
+The grounding source: real season stats (minutes, goals, assists, xG, xA, shots,
+key passes, xGChain, xGBuildup, cards) for every player in the top five leagues.
+
+One request per league per season, cached for 24h, then all lookups are local.
 No API key needed.
 """
 
-import re
 import json
-import httpx
-from typing import Dict, List, Optional
 import logging
-from data_sources.base_source import BaseSource
+import re
+from typing import Dict, List, Optional
+
+from thefuzz import fuzz
+
+from config import settings
+from data_sources.base_source import BaseSource, http_request
 from data_sources.data_cache import DataCache
 
 logger = logging.getLogger(__name__)
 
-# Understat league URL slugs
+# Our league key -> Understat slug
 UNDERSTAT_LEAGUES = {
     "premier_league": "EPL",
     "la_liga": "La_liga",
@@ -25,281 +30,220 @@ UNDERSTAT_LEAGUES = {
     "ligue_1": "Ligue_1",
 }
 
-# Understat's internal API uses lowercase league names
-UNDERSTAT_API_LEAGUES = {
-    "premier_league": "epl",
-    "la_liga": "la_liga",
-    "bundesliga": "bundesliga",
-    "serie_a": "serie_a",
-    "ligue_1": "ligue_1",
+# Understat position codes: GK, D, M, F, S (sub). A player can carry several, e.g. "F M S".
+POSITION_FAMILIES = {
+    "goalkeeper": {"GK"},
+    "defender": {"D"},
+    "midfielder": {"M"},
+    "forward": {"F"},
 }
+
+_FAMILY_KEYWORDS = [
+    ("goalkeeper", ("goalkeeper", "keeper", "gk")),
+    ("defender", ("back", "defender", "centre-back", "center-back", "cb", "wing-back", "stopper", "libero")),
+    ("forward", ("striker", "forward", "winger", "no.9", "number 9", "wide", "attacker", "false 9")),
+    ("midfielder", ("midfield", "cdm", "no.10", "number 10", "playmaker", "pivot", "box-to-box", "regista", "mezzala")),
+]
+
+
+def position_family(position: str) -> str:
+    """Map a free-text position ("inverted winger") to a coarse family ("forward")."""
+    p = (position or "").lower()
+    for family, words in _FAMILY_KEYWORDS:
+        if any(w in p for w in words):
+            return family
+    return "forward"
+
+
+def allowed_codes(requested: str) -> set:
+    """Understat codes that count as the requested role.
+    Wingers and attacking midfielders are listed as F or M, so we accept both for them."""
+    family = position_family(requested)
+    allowed = set(POSITION_FAMILIES[family])
+    p = (requested or "").lower()
+    if family == "forward" and any(w in p for w in ("winger", "wide", "inside")):
+        allowed |= {"M"}
+    if family == "midfielder" and any(w in p for w in ("attacking", "no.10", "number 10", "playmaker")):
+        allowed |= {"F"}
+    return allowed
+
+
+def position_matches(understat_position: str, requested: str) -> bool:
+    """Does an Understat position string fit the requested role?"""
+    return bool(set((understat_position or "").split()) & allowed_codes(requested))
 
 
 class UnderstatSource(BaseSource):
-    """
-    Fetches xG/xA data from Understat's internal JSON API.
-    Understat moved to client-side rendering, so we use their
-    internal API endpoints instead of page scraping.
-    """
-
     source_name = "understat"
     BASE_URL = "https://understat.com"
+    # Set once the site is seen to be down (maintenance page, or no answer), so the rest of the run
+    # uses the cache instead of waiting on every league-season in turn.
+    site_down: Optional[str] = None
 
-    # Current season (2024 = 2024-25 season on Understat)
-    CURRENT_SEASON = 2024
+    @classmethod
+    async def probe(cls) -> Optional[str]:
+        """One quick request (no retries). Returns None if Understat answers with data pages,
+        otherwise why it is down, and remembers that for the rest of the run."""
+        resp = await http_request("GET", f"{cls.BASE_URL}/league/EPL", retries=0)
+        if resp is None:
+            cls.site_down = "no answer"
+        elif cls.is_maintenance_page(resp.text):
+            cls.site_down = "maintenance page"
+        else:
+            cls.site_down = None
+        return cls.site_down
 
-    def __init__(self, cache: Optional[DataCache] = None):
+    def __init__(self, cache: Optional[DataCache] = None, season: Optional[int] = None):
         self.cache = cache or DataCache()
+        self.season = season or settings.UNDERSTAT_SEASON
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://understat.com/",
+            "User-Agent": "ai-scout/2.0 (portfolio project)",
+            "Accept": "application/json, text/html;q=0.9",
             "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self.BASE_URL}/",
         }
 
-    async def _fetch_league_data(self, league: str, season: int = None) -> List[Dict]:
-        """
-        Fetch league player data from Understat.
-        Tries the internal API first, then falls back to HTML scraping.
-        """
-        season = season or self.CURRENT_SEASON
-        league_slug = UNDERSTAT_API_LEAGUES.get(league.lower(), "epl")
+    # ── fetching ───────────────────────────────────────────────
+    async def league_players(self, league: str) -> List[Dict]:
+        """All players of one league this season, normalised to per-90 stats."""
+        raw = await self._fetch_league_raw(league)
+        return [p for p in (self._normalise(r, league) for r in raw) if p]
 
-        cache_key = f"understat:league:{league_slug}:{season}"
+    async def _fetch_league_raw(self, league: str) -> List[Dict]:
+        slug = UNDERSTAT_LEAGUES.get(league)
+        if not slug:
+            return []
+        cache_key = f"understat:league:{slug}:{self.season}"
         cached = self.cache.get(cache_key)
-        if cached:
+        if cached is not None:
             return cached.get("players", [])
 
-        # Try multiple approaches to get data
-        players = await self._try_api_endpoint(league_slug, season)
-        if not players:
-            players = await self._try_html_scraping(league, season)
-
+        players = [] if UnderstatSource.site_down else (await self._fetch_json_api(slug) or await self._fetch_html(slug))
         if players:
             self.cache.set(cache_key, {"players": players})
-
+            return players
+        stale = self.cache.get(cache_key, stale_ok=True)        # site down: the last good copy
+        if stale is not None:
+            logger.warning("Understat: %s %s unreachable, using the cached copy", slug, self.season)
+            return stale.get("players", [])
+        logger.debug("Understat: no data for %s %s", slug, self.season)
         return players
 
-    async def _try_api_endpoint(self, league_slug: str, season: int) -> List[Dict]:
-        """Try Understat's internal API endpoints."""
-        api_paths = [
-            f"/main/getPlayersStats/{league_slug}/{season}",
-            f"/api/stats/league/{league_slug}/{season}",
-            f"/stats/league/{league_slug}/{season}",
-        ]
+    async def _fetch_json_api(self, slug: str) -> List[Dict]:
+        """Current site: a JSON endpoint returning {"players": [...], "teams": ..., "dates": ...}."""
+        resp = await http_request("GET", f"{self.BASE_URL}/getLeagueData/{slug}/{self.season}", headers=self.headers)
+        if resp is None:
+            return []
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            return []
+        return self.parse_league_payload(data)
 
-        for path in api_paths:
-            try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    response = await client.get(
-                        f"{self.BASE_URL}{path}",
-                        headers=self.headers,
-                        follow_redirects=True,
-                    )
-                    if response.status_code != 200:
-                        continue
+    async def _fetch_html(self, slug: str) -> List[Dict]:
+        """Older site: player data embedded as `var playersData = JSON.parse('...')`."""
+        resp = await http_request("GET", f"{self.BASE_URL}/league/{slug}/{self.season}", headers=self.headers)
+        if resp is None:
+            return []
+        if self.is_maintenance_page(resp.text):
+            if not UnderstatSource.site_down:
+                logger.warning("Understat is showing its maintenance page ('We will come back soon'); using the cache")
+            UnderstatSource.site_down = "maintenance page"
+            return []
+        return self.parse_embedded_html(resp.text)
 
-                    data = response.json()
-                    # Check various response structures
-                    if isinstance(data, list) and data:
-                        return data
-                    if isinstance(data, dict):
-                        if "error" in data and data["error"].get("error_code"):
-                            continue
-                        # Try common keys
-                        for key in ["players", "response", "data", "players_stats"]:
-                            if key in data and isinstance(data[key], list):
-                                return data[key]
+    @staticmethod
+    def is_maintenance_page(html: str) -> bool:
+        """Understat answers every URL with HTTP 200 and this page while it is down."""
+        return "come back soon" in (html or "").lower() and "playersData" not in (html or "")
 
-            except (httpx.HTTPError, json.JSONDecodeError) as e:
-                logger.debug(f"Understat API attempt failed ({path}): {e}")
-                continue
-
+    @staticmethod
+    def parse_league_payload(data) -> List[Dict]:
+        if isinstance(data, dict):
+            players = data.get("players")
+            if isinstance(players, list):
+                return players
+        if isinstance(data, list):
+            return data
         return []
 
-    async def _try_html_scraping(self, league: str, season: int) -> List[Dict]:
-        """
-        Fallback: try to extract data from the HTML page.
-        Even if embedded JSON is gone, try all known patterns.
-        """
-        league_slug = UNDERSTAT_LEAGUES.get(league.lower(), "EPL")
-        url = f"{self.BASE_URL}/league/{league_slug}/{season}"
-
+    @staticmethod
+    def parse_embedded_html(html: str) -> List[Dict]:
+        match = re.search(r"var\s+playersData\s*=\s*JSON\.parse\('(.+?)'\)", html)
+        if not match:
+            return []
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(url, headers=self.headers, follow_redirects=True)
-                response.raise_for_status()
-                html = response.text
-
-            # Try multiple extraction patterns
-            for var_name in ["playersData", "players_data", "PLAYERS"]:
-                data = self._extract_json_var(html, var_name)
-                if data:
-                    return data
-
-            # Try finding any large JSON array in script tags
-            data = self._extract_any_player_json(html)
-            if data:
-                return data
-
-            logger.warning(f"Understat: Could not extract player data from {league_slug}/{season}")
+            return json.loads(match.group(1).encode("utf-8").decode("unicode_escape"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return []
 
-        except httpx.HTTPError as e:
-            logger.error(f"Understat HTML fetch error: {e}")
-            return []
+    # ── normalising ────────────────────────────────────────────
+    def _normalise(self, p: Dict, league: str) -> Optional[Dict]:
+        name = p.get("player_name") or p.get("name")
+        if not name:
+            return None
+        minutes = self._safe_int(p.get("time"))
+        n90 = max(minutes / 90, 1.0)
 
-    def _extract_json_var(self, html: str, var_name: str) -> Optional[List]:
-        """Extract JSON data from embedded script variables."""
-        # Pattern 1: var NAME = JSON.parse('...')
-        pattern = rf"var\s+{var_name}\s*=\s*JSON\.parse\('(.+?)'\)"
-        match = re.search(pattern, html)
-        if match:
-            try:
-                decoded = match.group(1).encode("utf-8").decode("unicode_escape")
-                return json.loads(decoded)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                pass
+        def per90(key: str) -> float:
+            return round(self._safe_float(p.get(key)) / n90, 3)
 
-        # Pattern 2: var NAME = [...]  or var NAME = {...}
-        pattern = rf"var\s+{var_name}\s*=\s*(\[.+?\]);?"
-        match = re.search(pattern, html, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
+        return {
+            "player_id": f"us:{p.get('id', name)}",
+            "name": name,
+            "team": p.get("team_title", ""),
+            "league": league,
+            "understat_position": p.get("position", ""),
+            "minutes_played": minutes,
+            "games": self._safe_int(p.get("games")),
+            "goals": self._safe_int(p.get("goals")),
+            "assists": self._safe_int(p.get("assists")),
+            "goals_p90": per90("goals"),
+            "assists_p90": per90("assists"),
+            "xG_p90": per90("xG"),
+            "xA_p90": per90("xA"),
+            "npxG_p90": per90("npxG"),
+            "shots_p90": per90("shots"),
+            "key_passes_p90": per90("key_passes"),
+            "xGChain_p90": per90("xGChain"),
+            "xGBuildup_p90": per90("xGBuildup"),
+            "yellow_cards": self._safe_int(p.get("yellow_cards")),
+            "red_cards": self._safe_int(p.get("red_cards")),
+            "season": f"{self.season}-{str(self.season + 1)[-2:]}",
+        }
 
-        return None
+    # ── queries ────────────────────────────────────────────────
+    async def search(self, league: str, position: Optional[str] = None, min_minutes: int = 0,
+                     sort_by: str = "xGChain_p90", limit: int = 20) -> List[Dict]:
+        return filter_players(await self.league_players(league), position, min_minutes, sort_by, limit)
 
-    def _extract_any_player_json(self, html: str) -> Optional[List]:
-        """Try to find any JSON array that looks like player data."""
-        pattern = r'JSON\.parse\(\'(.+?)\'\)'
-        matches = re.findall(pattern, html)
+    async def find_player(self, name: str, team: Optional[str] = None,
+                          leagues: Optional[List[str]] = None) -> Optional[Dict]:
+        rows: List[Dict] = []
+        for league in leagues or list(UNDERSTAT_LEAGUES):
+            rows += await self.league_players(league)
+        return best_match(name, rows, team)
 
-        for match_str in matches:
-            try:
-                decoded = match_str.encode("utf-8").decode("unicode_escape")
-                data = json.loads(decoded)
-                if isinstance(data, list) and len(data) > 10:
-                    # Check if it looks like player data
-                    if data[0] and any(k in str(data[0]).lower() for k in ["player", "xg", "goals"]):
-                        return data
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
 
-        return None
+def filter_players(rows: List[Dict], position: Optional[str] = None, min_minutes: int = 0,
+                   sort_by: str = "xGChain_p90", limit: int = 20) -> List[Dict]:
+    """Players with enough minutes in the requested role, best first by `sort_by`."""
+    out = [
+        p for p in rows
+        if p["minutes_played"] >= min_minutes
+        and (not position or position_matches(p["understat_position"], position))
+    ]
+    out.sort(key=lambda p: p.get(sort_by, 0.0), reverse=True)
+    return out[:limit]
 
-    async def search_players(
-        self,
-        name: Optional[str] = None,
-        position: Optional[str] = None,
-        league: Optional[str] = None,
-        max_age: Optional[int] = None,
-        min_minutes: int = 900,
-    ) -> List[Dict]:
-        """Search for players in a league."""
-        target_league = (league or "premier_league").lower()
 
-        players_data = await self._fetch_league_data(target_league)
-        if not players_data:
-            logger.warning(f"Understat: No data available for {target_league}")
-            return []
-
-        results = []
-        for p in players_data:
-            # Handle different key naming conventions
-            player_name = p.get("player_name", p.get("name", p.get("player", "")))
-
-            # Filter by name if provided
-            if name and name.lower() not in player_name.lower():
-                continue
-
-            minutes = self._safe_int(p.get("time", p.get("minutes", 0)))
-            if minutes < min_minutes:
-                continue
-
-            p90 = max(minutes / 90, 1)
-            xg = self._safe_float(p.get("xG", p.get("xg", 0)))
-            xa = self._safe_float(p.get("xA", p.get("xa", 0)))
-            goals = self._safe_int(p.get("goals", 0))
-            assists = self._safe_int(p.get("assists", 0))
-
-            player_dict = {
-                "player_id": str(p.get("id", "")),
-                "name": player_name,
-                "team": p.get("team_title", p.get("team", "")),
-                "position": p.get("position", ""),
-                "minutes_played": minutes,
-                "goals": goals,
-                "assists": assists,
-                "xG": xg,
-                "xA": xa,
-                "xG_p90": round(xg / p90, 3),
-                "xA_p90": round(xa / p90, 3),
-                "goals_p90": round(goals / p90, 3),
-                "assists_p90": round(assists / p90, 3),
-                "shots": self._safe_int(p.get("shots", 0)),
-                "key_passes": self._safe_int(p.get("key_passes", 0)),
-                "npg": self._safe_int(p.get("npg", 0)),
-                "npxG": self._safe_float(p.get("npxG", p.get("npxg", 0))),
-                "xGChain": self._safe_float(p.get("xGChain", p.get("xg_chain", 0))),
-                "xGBuildup": self._safe_float(p.get("xGBuildup", p.get("xg_buildup", 0))),
-                "source": self.source_name,
-            }
-
-            results.append(player_dict)
-
-        logger.info(f"Understat: Found {len(results)} players in {target_league}")
-        return results
-
-    async def get_player_stats(self, player_name: str, season: str = "2025-26") -> Optional[Dict]:
-        """Get xG/xA stats for a specific player across all tracked leagues."""
-        for league in UNDERSTAT_LEAGUES:
-            results = await self.search_players(name=player_name, league=league)
-            if results:
-                return results[0]
-        return None
-
-    async def get_player_shot_data(self, player_id: int) -> List[Dict]:
-        """Get detailed shot-level data for a player."""
-        cache_key = f"understat:shots:{player_id}"
-        cached = self.cache.get(cache_key)
-        if cached:
-            return cached.get("shots", [])
-
-        # Try API endpoint
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(
-                    f"{self.BASE_URL}/player/{player_id}",
-                    headers=self.headers,
-                    follow_redirects=True,
-                )
-                response.raise_for_status()
-                html = response.text
-
-            shots_data = self._extract_json_var(html, "shotsData")
-            if not shots_data:
-                shots_data = self._extract_json_var(html, "shots_data")
-            if not shots_data:
-                return []
-
-            shots = [
-                {
-                    "x": self._safe_float(s.get("X")) * 105,
-                    "y": self._safe_float(s.get("Y")) * 68,
-                    "xG": self._safe_float(s.get("xG")),
-                    "result": s.get("result", ""),
-                    "situation": s.get("situation", ""),
-                    "minute": self._safe_int(s.get("minute")),
-                }
-                for s in shots_data
-            ]
-            self.cache.set(cache_key, {"shots": shots})
-            return shots
-
-        except httpx.HTTPError as e:
-            logger.error(f"Understat shot data fetch error: {e}")
-            return []
+def best_match(name: str, rows: List[Dict], team: Optional[str] = None, min_score: int = 85) -> Optional[Dict]:
+    """Fuzzy-match a name against player rows; a matching club breaks ties between namesakes."""
+    best, best_score = None, 0
+    for p in rows:
+        score = fuzz.token_sort_ratio(name.lower(), p["name"].lower())
+        if team and p.get("team") and fuzz.partial_ratio(team.lower(), p["team"].lower()) >= 80:
+            score += 5
+        if score > best_score:
+            best, best_score = p, score
+    return best if best_score >= min_score else None

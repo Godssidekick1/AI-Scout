@@ -1,75 +1,74 @@
 """
 Scouting Report Models
 ======================
-Data structures for character reports, financial assessments, and the final scouting report.
 """
 
 from typing import Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
 class CharacterReport(BaseModel):
-    """Character and behavioral assessment from news/media analysis."""
-
+    player_id: str
     player_name: str = ""
     attitude_score: float = Field(default=7.5, ge=0, le=10)
-    discipline_issues: List[str] = []
-    injury_history: List[str] = []
+    discipline_issues: List[str] = Field(default_factory=list)
+    injury_history: List[str] = Field(default_factory=list)
     injury_risk_score: float = Field(default=2.0, ge=0, le=10)
-    total_days_injured_24mo: int = 0
-    maturity_assessment: str = ""
-    locker_room_presence: str = ""
-    sources: List[str] = []
+    total_days_injured: int = 0
+    maturity_assessment: str = "No data available"
+    locker_room_presence: str = "Unknown"
+    key_concerns: List[str] = Field(default_factory=list)
+    sources: List[str] = Field(default_factory=list)
 
 
 class FinancialAssessment(BaseModel):
-    """Financial viability analysis from market data."""
-
+    player_id: str
     player_name: str = ""
-    current_market_value_eur: float = 0       # in millions
+    current_market_value_eur: float = 0             # millions
+    market_value_is_estimate: bool = False
     contract_end_date: str = ""
-    years_remaining: float = 0
+    years_remaining: Optional[float] = None
     agent: str = ""
-    release_clause_eur: Optional[float] = None
     estimated_wage_weekly_eur: float = 0
     value_for_money_score: float = Field(default=50.0, ge=0, le=100)
-    transfer_feasibility: str = ""            # "Easy", "Moderate", "Difficult"
+    transfer_feasibility: str = "Unknown"
 
 
 class ScoutingReport(BaseModel):
-    """Final comprehensive scouting report for a player."""
+    """Final report for one player. Every pipeline output is validated against this."""
 
-    # --- Player Info ---
-    player_name: str = ""
+    player_id: str
+    player_name: str
     position: str = ""
-    age: int = 0
+    understat_position: str = ""
+    age: Optional[int] = None
     team: str = ""
     league: str = ""
-    nationality: str = ""
+    season: str = ""
 
-    # --- Scores ---
-    tactical_fit_score: float = Field(default=0, ge=0, le=100)
-    statistical_rating: float = Field(default=0, ge=0, le=100)
-    character_score: float = Field(default=7.5, ge=0, le=10)
-    financial_viability: float = Field(default=50, ge=0, le=100)
-    injury_risk: float = Field(default=2.0, ge=0, le=10)
+    tactical_fit_score: float = Field(ge=0, le=100)
+    tactical_fit_coverage: float = Field(ge=0, le=1, description="Share of the fit model's features that had data.")
+    statistical_rating: float = Field(ge=0, le=100)
+    character_score: float = Field(ge=0, le=10)
+    financial_viability: float = Field(ge=0, le=100)
+    injury_risk: float = Field(ge=0, le=10)
 
-    # --- Verdict ---
-    overall_score: float = Field(default=0, ge=0, le=100)
-    verdict: str = "CAUTION"       # "GO", "CAUTION", "NO-GO"
+    overall_score: float = Field(ge=0, le=100)
+    verdict: str                                     # "GO" | "CAUTION" | "NO-GO"
 
-    # --- Analysis ---
-    strengths: List[str] = []
-    weaknesses: List[str] = []
-    risk_factors: List[str] = []
+    strengths: List[str] = Field(default_factory=list)
+    weaknesses: List[str] = Field(default_factory=list)
+    risk_factors: List[str] = Field(default_factory=list)
 
-    # --- Comparisons ---
-    similar_players: List[str] = []
-    benchmark_comparison: Dict[str, float] = {}
+    similar_players: List[str] = Field(default_factory=list)
+    benchmark_comparison: Dict[str, float] = Field(default_factory=dict)
 
-    # --- Detailed Data ---
+    key_stats: Dict[str, float] = Field(default_factory=dict)
+    projection: Dict[str, float] = Field(default_factory=dict)   # model forecast at the target club, with 80% range
+    role_score: Optional[float] = None
+    value_gap: Optional[float] = None
     character_report: Optional[CharacterReport] = None
     financial_assessment: Optional[FinancialAssessment] = None
-
-    # --- LLM narrative ---
     executive_summary: str = ""
+    data_sources: List[str] = Field(default_factory=list)

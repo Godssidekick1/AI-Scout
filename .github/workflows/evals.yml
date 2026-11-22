@@ -1,0 +1,32 @@
+name: Evals
+
+# Manual: runs real Gemini calls and live data sources. Needs the GOOGLE_API_KEY
+# repository secret (and optionally SERPER_API_KEY).
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "parse or pipeline"
+        default: "parse"
+      limit:
+        description: "number of golden queries (0 = all)"
+        default: "0"
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m evals.run_evals --suite "${{ inputs.suite }}" --limit "${{ inputs.limit }}" --no-cache
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: evals/results/

@@ -1,53 +1,61 @@
 """
 Base Data Source
 ================
-Abstract interface that all data sources implement.
+Shared helpers for all football data sources: a retrying HTTP request helper
+and safe numeric conversion.
 """
 
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+import asyncio
 import logging
+import random
+from typing import Optional
+
+import httpx
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
-class BaseSource(ABC):
+
+async def http_request(method: str, url: str, *, headers: Optional[dict] = None,
+                       params: Optional[dict] = None, json_body: Optional[dict] = None,
+                       retries: Optional[int] = None) -> Optional[httpx.Response]:
     """
-    Base class for all football data sources.
-    Every source must implement search_players() and get_player_stats().
+    GET/POST with a timeout and exponential backoff on transport errors,
+    429 and 5xx. Returns the response on 2xx, None otherwise (callers degrade
+    gracefully rather than crash the run).
     """
+    retries = settings.HTTP_MAX_RETRIES if retries is None else retries
+    for attempt in range(retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_S, follow_redirects=True) as client:
+                resp = await client.request(method, url, headers=headers, params=params, json=json_body)
+            if resp.status_code < 400:
+                return resp
+            if resp.status_code not in RETRYABLE_STATUS:
+                logger.warning("%s %s -> HTTP %d", method, url, resp.status_code)
+                return None
+            reason = f"HTTP {resp.status_code}"
+        except httpx.HTTPError as e:
+            reason = f"{type(e).__name__}: {e}"
+        if attempt < retries:
+            delay = 0.5 * 2 ** attempt + random.uniform(0, 0.25)
+            logger.debug("%s %s failed (%s); retry in %.1fs", method, url, reason, delay)
+            await asyncio.sleep(delay)
+        else:
+            logger.warning("%s %s failed after %d attempts (%s)", method, url, retries + 1, reason)
+    return None
+
+
+class BaseSource:
+    """Common base for football data sources."""
 
     source_name: str = "base"
 
-    @abstractmethod
-    async def search_players(
-        self,
-        name: Optional[str] = None,
-        position: Optional[str] = None,
-        league: Optional[str] = None,
-        max_age: Optional[int] = None,
-        min_minutes: int = 900,
-    ) -> List[Dict]:
-        """
-        Search for players matching the given filters.
-
-        Returns:
-            List of player dictionaries with at least 'name', 'team', 'position'.
-        """
-        pass
-
-    @abstractmethod
-    async def get_player_stats(self, player_name: str, season: str = "2025-26") -> Optional[Dict]:
-        """
-        Get detailed statistics for a specific player.
-
-        Returns:
-            Dictionary of player stats, or None if not found.
-        """
-        pass
-
-    def _safe_float(self, value, default: float = 0.0) -> float:
-        """Safely convert a value to float."""
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
         try:
             if value is None or value == "" or value == "-":
                 return default
@@ -55,8 +63,8 @@ class BaseSource(ABC):
         except (ValueError, TypeError):
             return default
 
-    def _safe_int(self, value, default: int = 0) -> int:
-        """Safely convert a value to int."""
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
         try:
             if value is None or value == "" or value == "-":
                 return default

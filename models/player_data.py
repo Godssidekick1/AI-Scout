@@ -1,107 +1,69 @@
 """
 Player Data Models
 ==================
-Data structures for player profiles, statistics, and game attributes.
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
-class PlayerProfile(BaseModel):
-    """Basic biographical and career information about a player."""
+class ProposedCandidate(BaseModel):
+    """A name the finder agent puts forward. Nothing here is trusted until verified."""
 
-    player_id: str = ""
+    name: str = Field(description="Full player name as commonly written.")
+    team: Optional[str] = Field(default=None, description="Current club, if known.")
+    claimed_age: Optional[int] = Field(default=None, description="Age if known; verified later where possible.")
+    reason: str = Field(default="", description="One line on why this player fits.")
+
+
+class Candidate(BaseModel):
+    """A verified candidate: identity and stats come from Understat, money from Transfermarkt."""
+
+    player_id: str
     name: str
-    age: int = 0
-    nationality: str = ""
     team: str = ""
     league: str = ""
-    position: str = ""
-    secondary_positions: List[str] = []
-    contract_end: str = ""        # e.g. "2027-06-30"
-    market_value_eur: float = 0   # in millions
-    agent: str = ""
+    position: str = ""                 # role searched for
+    understat_position: str = ""       # e.g. "F M S"
+    season: str = ""
+    age: Optional[int] = None
+    age_source: str = "unknown"        # "transfermarkt" | "llm_claim" | "unknown"
 
-
-class PlayerStats(BaseModel):
-    """Per-90 performance statistics from real data sources."""
-
-    player_id: str = ""
-    name: str = ""
-    season: str = ""               # e.g. "2025-26"
     minutes_played: int = 0
-
-    # --- Attacking / Creative ---
+    games: int = 0
+    goals: int = 0
+    assists: int = 0
     goals_p90: float = 0.0
     assists_p90: float = 0.0
-    xG_p90: float = 0.0            # Expected Goals
-    xA_p90: float = 0.0            # Expected Assists
-    xT_p90: float = 0.0            # Expected Threat
-    shot_creating_actions_p90: float = 0.0
-    passes_into_penalty_area_p90: float = 0.0
-    pv_plus: float = 0.0           # Possession Value Added
-
-    # --- Ball Progression ---
-    progressive_carries_p90: float = 0.0
-    progressive_carries_distance: float = 0.0
-    progressive_passes_p90: float = 0.0
-
-    # --- Defensive ---
-    tackles_p90: float = 0.0
-    interceptions_p90: float = 0.0
-    pressing_success_pct: float = 0.0
-    defensive_duel_win_rate: float = 0.0
-    blocks_p90: float = 0.0
-
-    # --- Physical ---
-    high_intensity_sprints_p90: float = 0.0
-
-    # --- Discipline ---
+    xG_p90: float = 0.0
+    xA_p90: float = 0.0
+    npxG_p90: float = 0.0
+    shots_p90: float = 0.0
+    key_passes_p90: float = 0.0
+    xGChain_p90: float = 0.0
+    xGBuildup_p90: float = 0.0
     yellow_cards: int = 0
     red_cards: int = 0
 
-    # --- Meta ---
-    league_coefficient: float = 1.0     # After league-tax adjustment
+    # EA FC attributes (0-99) when FUTWIZ has the player
+    ea_overall: Optional[int] = None
+    ea_pace: Optional[int] = None
+    ea_dribbling: Optional[int] = None
+    ea_passing: Optional[int] = None
+    ea_defending: Optional[int] = None
+    ea_physical: Optional[int] = None
+
+    market_value_eur_m: Optional[float] = None
+    contract_end_date: str = ""
+    agent: str = ""
+
+    league_coefficient: float = 1.0
     adjusted_for_pl: bool = False
+    why_recommended: str = ""
+    sources: List[str] = Field(default_factory=list)
 
-
-class PlayerAttributes(BaseModel):
-    """
-    EA FC 26-style player attributes.
-    Sourced from FUTWIZ (live form) to reflect current-season performance.
-    """
-
-    player_id: str = ""
-    name: str = ""
-    overall_rating: int = 0
-
-    # --- Core 6 attributes (0-99 scale) ---
-    pace: int = 0
-    shooting: int = 0
-    passing: int = 0
-    dribbling: int = 0
-    defending: int = 0
-    physical: int = 0
-
-    # --- Extras ---
-    weak_foot: int = 0              # 1-5 stars
-    skill_moves: int = 0            # 1-5 stars
-    work_rate_attack: str = ""      # High / Medium / Low
-    work_rate_defense: str = ""     # High / Medium / Low
-
-    # --- Live form ---
-    form_modifier: int = 0          # Live form adjustment (-3 to +3)
-    is_in_form: bool = False
-
-
-class MergedPlayerData(BaseModel):
-    """
-    All data about a single player merged from multiple sources.
-    This is what agents work with internally.
-    """
-
-    profile: PlayerProfile = Field(default_factory=PlayerProfile)
-    stats: PlayerStats = Field(default_factory=PlayerStats)
-    attributes: Optional[PlayerAttributes] = None
-    data_sources: List[str] = []    # Which sources contributed data
+    # Forecast model (v3): next season's projection at the target club, when the model is built.
+    projection: Dict[str, float] = Field(default_factory=dict)   # pred_/lo_/hi_<metric>, expected_minutes
+    role_score: Optional[float] = None                            # 0 = average player in the role
+    value_gap: Optional[float] = None                             # 0.5 = output suggests worth 50% more than price

@@ -5,10 +5,9 @@ Uses Serper.dev to search the web for player news, sentiment, and character inte
 Free tier: 2,500 searches/month.
 """
 
-import httpx
 from typing import Dict, List, Optional
 import logging
-from data_sources.base_source import BaseSource
+from data_sources.base_source import BaseSource, http_request
 from data_sources.data_cache import DataCache
 from config import settings
 
@@ -28,14 +27,6 @@ class NewsSearchSource(BaseSource):
         self.api_key = settings.SERPER_API_KEY
         self.cache = cache or DataCache(ttl_hours=12)  # 12-hour cache for news
 
-    async def search_players(self, name: Optional[str] = None, **kwargs) -> List[Dict]:
-        """Not used for news — use search_news() instead."""
-        return []
-
-    async def get_player_stats(self, player_name: str, season: str = "2025-26") -> Optional[Dict]:
-        """Not used for news — use search_news() instead."""
-        return None
-
     async def search_news(
         self,
         player_name: str,
@@ -52,10 +43,10 @@ class NewsSearchSource(BaseSource):
             List of news article dictionaries
         """
         query_templates = {
-            "general": f"{player_name} football latest news 2026",
+            "general": f"{player_name} football latest news",
             "character": f"{player_name} football attitude discipline behavior controversy",
-            "injury": f"{player_name} football injury update fitness 2025 2026",
-            "transfer": f"{player_name} transfer news rumour contract 2026",
+            "injury": f"{player_name} football injury update fitness",
+            "transfer": f"{player_name} transfer news rumour contract",
         }
 
         query = query_templates.get(query_type, query_templates["general"])
@@ -69,25 +60,14 @@ class NewsSearchSource(BaseSource):
             logger.warning("Serper API key not configured. Skipping news search.")
             return []
 
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.post(
-                    self.API_URL,
-                    headers={
-                        "X-API-KEY": self.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "q": query,
-                        "num": 5,
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-
-        except httpx.HTTPError as e:
-            logger.error(f"Serper API error: {e}")
+        response = await http_request(
+            "POST", self.API_URL,
+            headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
+            json_body={"q": query, "num": 5},
+        )
+        if response is None:
             return []
+        data = response.json()
 
         # Parse results
         results = []
