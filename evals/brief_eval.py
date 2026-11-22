@@ -153,22 +153,32 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-llm", action="store_true", help="use the rule-based reader")
     ap.add_argument("--only", nargs="+", help="brief ids to run")
+    ap.add_argument("--file", default="briefs.json",
+                    help="brief set in evals/ (briefs_holdout.json: phrasings the reader was not tuned on)")
     ap.add_argument("--model", help="saved model path (default: the build's)")
     ap.add_argument("-n", type=int, default=10)
     ap.add_argument("-v", "--verbose", action="store_true", help="print each shortlist")
+    ap.add_argument("--synthetic-names", action="store_true",
+                    help="offline check of the reader: a synthetic build with real club and player names")
     args = ap.parse_args(argv)
 
     service = ForecastService.load(Path(args.model) if args.model else None)
     if service is None:
         sys.exit("No saved model. Run python -m forecast.build first.")
-    if service.synthetic:
-        print("Warning: SYNTHETIC model. Real names will not be found; build on real data for a meaningful eval.\n")
+    if service.synthetic and args.synthetic_names:
+        from forecast import synthetic
+        service.ps, service.profiles = synthetic.with_real_names(service.ps, getattr(service, "profiles", None))
+        service.__dict__.pop("_def_profile", None)
+        print("Synthetic model with real names: checks the reader and the filters, not football.\n")
+    elif service.synthetic:
+        print("Warning: SYNTHETIC model. Real names will not be found; build on real data for a meaningful eval "
+              "(or pass --synthetic-names).\n")
     settings.ENABLE_VECTOR_INDEX = False
     if args.no_llm:
         settings.GOOGLE_API_KEY = ""
     reader = "rules" if not settings.has_gemini() else "Gemini"
 
-    cases = json.loads((HERE / "briefs.json").read_text(encoding="utf-8"))
+    cases = json.loads((HERE / args.file).read_text(encoding="utf-8"))
     if args.only:
         cases = [c for c in cases if c["id"] in set(args.only)]
 
@@ -212,7 +222,7 @@ def main(argv=None) -> None:
             "| brief | reading | results | players |", "| --- | --- | --- | --- |"]
     head += [f"| {r['id']} | {r['read_ok']}/{r['read_n']} | {r['res_ok']}/{r['res_n']} | {r['n']} |" for r in rows]
     text = "\n".join(head + ["", "## Detail", ""] + lines) + "\n"
-    out = HERE / "results" / f"briefs_{dt.date.today().isoformat()}.md"
+    out = HERE / "results" / f"{Path(args.file).stem}_{dt.date.today().isoformat()}.md"
     out.parent.mkdir(exist_ok=True)
     out.write_text(text, encoding="utf-8")
     print("\n".join(head[:6]))

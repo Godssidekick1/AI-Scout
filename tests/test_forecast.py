@@ -513,3 +513,108 @@ def test_broken_install_is_reported_once_not_retried(service, monkeypatch):
     n = calls["n"]
     assert brief.understand("winger under 23", service).parser.startswith("rules (Gemini unavailable")
     assert calls["n"] == n                      # not tried again
+
+
+# ── recent positions, current clubs, experience, penalties (Transfermarkt profiles) ──
+
+@pytest.fixture(scope="module")
+def named(world, fitted):
+    """The synthetic world with real club and player names and Transfermarkt-style profiles."""
+    from forecast import synthetic as syn
+    ps, prof = syn.with_real_names(world["ps"], syn.profiles(world["ps"], seed=3))
+    rng = np.random.default_rng(0)
+    values = {u: float(np.exp(rng.normal(16, 1))) for u in ps["us_id"].unique()}
+    return ForecastService(ps=ps, model=fitted, minutes=MinutesModel().fit(world["full"], world["ps"]),
+                           values=values, synthetic=True, profiles=prof)
+
+
+def test_position_filter_uses_recent_starts(named):
+    cur = named.in_latest_season(named.current())
+    df = named.candidates("ball_playing_cb", n=200, sub_positions=["Centre-Back"], min_minutes=0)
+    share = named.position_share(df["us_id"], {"Centre-Back"})
+    assert not df.empty and (share.isna() | (share >= 0.5)).all()
+    # a listed centre-back who mostly started elsewhere is left out
+    listed = cur[cur["tm_sub_position"] == "Centre-Back"]
+    part_timers = listed[named.position_share(listed["us_id"], {"Centre-Back"}) < 0.5]["us_id"]
+    assert len(part_timers) and not set(part_timers) & set(df["us_id"])
+
+
+def test_also_positions_need_real_starts_there(named):
+    df = named.candidates("box_to_box", n=200, min_minutes=0, sub_positions=["Central Midfield"],
+                          also_positions=["Defensive Midfield"])
+    if not df.empty:
+        assert (named.position_share(df["us_id"], {"Defensive Midfield"}) >= 0.1).all()
+        assert (named.position_share(df["us_id"], {"Central Midfield"}) >= 0.25).all()
+
+
+def test_current_club_and_retired_players(named):
+    prof = named.profiles
+    moved = prof[prof["moved"] & prof["active"]]
+    gone = prof[~prof["active"]].index
+    df = named.candidates("complete_forward", n=500, min_minutes=0)
+    assert not set(gone) & set(df["us_id"])
+    row = moved.iloc[0]
+    out = named.project(named.current()[named.current()["us_id"] == moved.index[0]])
+    assert out["current_club"].iloc[0] == row["current_club"] and bool(out["moved"].iloc[0])
+    # excluding a club also excludes players who have since moved there
+    club = row["current_club"]
+    df = named.candidates(ROLES["complete_forward"].key, n=500, min_minutes=0, exclude_teams=[club])
+    assert club not in set(df["current_club"])
+
+
+def test_league_experience_and_penalties(named):
+    from forecast import brief
+    b = brief.parse("a winger with Premier League experience, playing in Spain", named)
+    assert b.experience_leagues == ["premier_league"] and b.leagues == ["la_liga"]
+    b2 = brief.parse("a striker proven in the Premier League", named)
+    assert b2.experience_leagues == ["premier_league"] and not b2.leagues and b2.min_minutes == 900
+    b3 = brief.parse("Barcelona want a left-back who knows the league", named)
+    assert b3.to_team == "Barcelona" and b3.experience_leagues == ["la_liga"]
+    df, _, _ = brief.search(b2, named, n=20)
+    assert (named.league_minutes(df["us_id"], ["premier_league"]) >= brief.EXPERIENCE_MINUTES).all()
+    p = brief.parse("a striker who takes penalties", named)
+    assert p.penalty_taker and not brief.parse("a striker who lives in the penalty box", named).penalty_taker
+    df, _, _ = brief.search(p, named, n=20)
+    assert not df.empty and (df["pens"] >= 2).all()
+
+
+def test_reader_positions_roles_and_emphasis(named):
+    from forecast import brief
+    b = brief.parse("goal scoring midfielder, great shooting ability, can calm the play down by playing as the "
+                    "holding mid, can also take penalties", named)
+    assert b.positions[:1] == ["central_mid"] and b.also_positions == ["defensive_mid"] and b.penalty_taker
+    assert b.role == "box_to_box"
+    prof, _ = brief.profile(b, named)
+    assert prof.weights.get("npxG", 0) + prof.weights.get("shots", 0) > 0.3   # the scoring ask moves the ranking
+    w = brief.parse("a right winger who can fill in at right-back if needed", named)
+    assert w.positions == ["winger"] and not w.also_positions and any("cover" in u for u in w.unmeasured)
+    assert brief.parse("a centre-back who can also play defensive midfield", named).also_positions == ["defensive_mid"]
+    s = brief.parse("Man City need a Stones replacement", named)
+    assert s.to_team == "Manchester City" and s.replace["name"] == "John Stones" and s.positions == ["centre_back"]
+    k = brief.parse("Bayern need a backup for Harry Kane", named)
+    assert k.replace["name"] == "Harry Kane" and k.to_team == "Bayern Munich"
+    assert brief.parse("Musiala-style attacking mid", named).anchor == "like"
+    assert brief.parse("a creative midfielder from serie a or la liga", named).leagues == ["la_liga", "serie_a"]
+    assert brief.parse("a German striker", named).leagues is None          # nationality, not a league
+
+
+def test_gemini_moves_to_next_model_on_daily_quota(named, monkeypatch):
+    from core import llm
+    from forecast import brief
+    from models.llm_schemas import BriefSpec
+    monkeypatch.setattr(settings, "GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "GEMINI_BRIEF_FALLBACKS", "model-b,model-c")
+    monkeypatch.setattr(brief, "_GEMINI_BROKEN", "")
+    monkeypatch.setattr(brief, "_MODEL_START", 0)
+    tried = []
+
+    async def fake(schema, messages, *, name, model=None, temperature=0.2):
+        tried.append(model)
+        if model != "model-c":
+            raise llm.LLMError("forecast.brief: Gemini daily quota used up")
+        return BriefSpec(interpretation="A striker.", positions=["striker"])
+    monkeypatch.setattr(llm, "structured", fake)
+    b = brief.understand("a striker", named)
+    assert b.parser == "Gemini (model-c)" and tried == [settings.GEMINI_MODEL, "model-b", "model-c"]
+    brief.understand("a winger", named)
+    assert tried[-1] == "model-c" and len(tried) == 4          # used-up models are not asked again
