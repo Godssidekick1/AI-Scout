@@ -53,6 +53,10 @@ class BriefSpec(BaseModel):
                                           "('replace Fofana'). Null if none.")
     similar_to: Optional[str] = Field(default=None, description="Player named as a style reference: 'like Madueke', "
                                       "'a Madueke type', 'similar to Rodri'. Null if none.")
+    similar_to_traits: List[EmphasisKey] = Field(default_factory=list, description="Only if similar_to is a retired "
+                                                 "player or one outside Europe's big five since 2014 (e.g. Kaka, "
+                                                 "Zidane): the measurable qualities he was known for.")
+    similar_to_position: Optional[PositionKey] = Field(default=None, description="That retired player's position.")
     must_beat: List[BeatSpec] = Field(default_factory=list, description="Players the target must out-produce: 'outdo "
                                       "Saka for goals' -> player 'Saka', quality goal_threat.")
     positions: List[PositionKey] = Field(default_factory=list, description="Positions wanted. A winger of any kind "

@@ -41,6 +41,9 @@ def _plain(text: str) -> str:
     return "".join(c for c in t if not unicodedata.combining(c)).strip()
 
 
+STYLE_WEIGHT = 0.75     # ranking weight of style (cosine, -1..1) next to the output score (in SDs)
+
+
 def style_score(cos) -> np.ndarray:
     """Cosine between style vectors (centred on the position's average, so -1..1) as 0-100:
     100 = same shape, 50 = unrelated, 0 = the opposite profile."""
@@ -298,8 +301,9 @@ class ForecastService:
                             Not checkable without lineup data (then only `sub_positions` applies).
         experience          (leagues, minutes): at least that many career minutes in one of the leagues.
         penalty_taker       took 2+ penalties over the last two seasons.
-        style_match         'a player like X': only players whose style points the same way as `target`
-                            (positive cosine, i.e. style score above 50) are ranked.
+        style_match         `target` is a player's style ('like X', or the player being replaced): only
+                            players whose style clearly leans his way (style score above 52) are kept, and
+                            the ranking adds STYLE_WEIGHT x style (cosine) to the projected output score.
         min_pass_pct        pass completion (0-1) over his last two seasons with FBref passing data;
                             players without that data are left out.
         Leagues and clubs to exclude are matched on the current club (Transfermarkt) as well as the
@@ -314,10 +318,11 @@ class ForecastService:
         if leagues:
             cur = cur[now_league.where(now_league.notna(), cur["league"]).isin(list(leagues))]
             now_club = now_club.loc[cur.index]
+        # hard limits: an unknown age or value (no Transfermarkt match) does not pass them
         if max_age is not None:
-            cur = cur[cur["age"].isna() | (cur["age"] <= max_age)]
+            cur = cur[cur["age"].notna() & (cur["age"] <= max_age)]
         if min_age is not None:
-            cur = cur[cur["age"].isna() | (cur["age"] >= min_age)]
+            cur = cur[cur["age"].notna() & (cur["age"] >= min_age)]
         teams = set(exclude_teams)
         cur = cur[~cur["us_id"].isin(set(exclude_ids)) & ~cur["team"].isin(teams)
                   & ~now_club.reindex(cur.index).isin(teams)]
@@ -346,7 +351,7 @@ class ForecastService:
         cur = cur[~cur["name"].str.lower().isin(excl)]
         if max_value_eur is not None:
             vals = cur["us_id"].map(self.values)
-            cur = cur[vals.isna() | (vals <= max_value_eur)]
+            cur = cur[vals.notna() & (vals <= max_value_eur)]
         if min_pass_pct is not None:
             prof = self.defensive_profile()
             if "def_pass_pct" not in prof:
@@ -368,7 +373,7 @@ class ForecastService:
             k = max(n * 2, 40)
         pool = self._retrieve(cur, role, min(k, 800), target)
         if style_match and target is not None:
-            pool = pool[pool["style_cos"] > 0.05]       # 'like X' must clearly lean his way (style above 52)
+            pool = pool[pool["style_cos"] > 0.05]       # must clearly lean his way (style above 52)
         if pool.empty:
             return pd.DataFrame()
 
@@ -376,6 +381,8 @@ class ForecastService:
         reference = self.with_defensive(self.in_latest_season(self.ps))
         proj["role_score"] = np.round(role_scores(proj, role, reference), 2)
         proj["style_similarity"] = pool["style_similarity"].to_numpy()
+        cos = pool["style_cos"].to_numpy(float)
+        proj["fit"] = proj["role_score"] + (STYLE_WEIGHT * cos if style_match and target is not None else 0.0)
         if target is None and not any(m in METRICS for m in role.weights):
             proj["style_similarity"] = np.nan      # a purely defensive profile has no attacking style to match
         proj["value_gap"] = np.round(value_gap(proj["role_score"].to_numpy(float),
@@ -386,4 +393,4 @@ class ForecastService:
             proj["also_share"] = self.position_share(proj["us_id"], set(also_positions)).to_numpy()
         if experience:
             proj["experience_minutes"] = self.league_minutes(proj["us_id"], experience[0]).to_numpy()
-        return proj.sort_values("role_score", ascending=False).head(n).reset_index(drop=True)
+        return proj.sort_values("fit", ascending=False).head(n).reset_index(drop=True)

@@ -388,7 +388,7 @@ def test_brief_search_matches_the_replaced_players_style_and_excludes_him(servic
     df, him, prof = brief.search(brief.parse("", service, replace=p["name"]), service, n=5)
     assert len(df) == 5 and p["us_id"] not in set(df["us_id"]) and set(df["group"]) == {"ST"}
     assert him["us_id"] == p["us_id"] and abs(sum(prof.weights.values()) - 1) < 0.02
-    assert df["role_score"].is_monotonic_decreasing
+    assert df["fit"].is_monotonic_decreasing and (df["style_similarity"] > 50).all()
     with pytest.raises(ValueError):
         brief.search(brief.parse("someone good", service), service)
 
@@ -618,3 +618,19 @@ def test_gemini_moves_to_next_model_on_daily_quota(named, monkeypatch):
     assert b.parser == "Gemini (model-c)" and tried == [settings.GEMINI_MODEL, "model-b", "model-c"]
     brief.understand("a winger", named)
     assert tried[-1] == "model-c" and len(tried) == 4          # used-up models are not asked again
+
+
+def test_replaced_player_and_retired_style_reference_are_kept_apart(named):
+    from forecast import brief
+    text = ("a midfielder who got the goal scoring ability and flair of kaka, in this modern generation, bursting "
+            "with talent, who is underexplored and would be a perfect fit as an attacking minded player at chelsea "
+            "to replace the underpeforming cole palmer.")
+    b = brief.parse(text, named)
+    assert b.replace["name"] == "Cole Palmer" and b.anchor == "replacing" and b.to_team == "Chelsea"
+    assert b.archetype and "goal threat" in b.emphasis_labels and "dribbling / take-ons" in b.emphasis_labels
+    assert b.max_age is None and b.sort == "value"            # no invented age cap; 'underexplored' = hidden
+    df, him, _ = brief.search(b, named, n=10)
+    assert not df.empty and (df["market_value_eur"] <= brief.HIDDEN_MAX_VALUE).all() and df["age"].notna().all()
+    s = brief.parse("someone with the vision of Pedri to replace Bukayo Saka", named)
+    assert s.replace["name"] == "Bukayo Saka" and s.style_ref["name"] == "Pedri"
+

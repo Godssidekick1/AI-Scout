@@ -98,6 +98,8 @@ def reading_checks(b: briefs.Brief, expect: Dict) -> List[Check]:
               f"read {b.min_pass_pct}")
     if "positions_include" in expect:
         check("positions include", set(expect["positions_include"]) <= set(b.positions), f"read {b.positions}")
+    if expect.get("max_age_none"):
+        check("no age cap invented", b.max_age is None, f"read {b.max_age}")
     if "no_leagues_filter" in expect:
         check("no league filter", not b.leagues, f"read {b.leagues}")
     if "unmeasured_any" in expect:
@@ -140,12 +142,13 @@ def result_checks(b: briefs.Brief, df: pd.DataFrame, service=None) -> List[Check
     if b.penalty_taker and "pens" in df:
         rule("took 2+ penalties", df["pens"].notna() & (df["pens"] < 2))
     if b.min_age is not None:
-        rule("min age", df["age"].notna() & (df["age"] < b.min_age))
+        rule("min age (unknown fails)", df["age"].isna() | (df["age"] < b.min_age))
     if b.max_age is not None:
-        rule("max age", df["age"].notna() & (df["age"] > b.max_age), int(df["age"].isna().sum()))
-    if b.max_value_eur is not None:
+        rule("max age (unknown fails)", df["age"].isna() | (df["age"] > b.max_age))
+    cap = b.max_value_eur if b.max_value_eur is not None else (briefs.HIDDEN_MAX_VALUE if b.sort == "value" else None)
+    if cap is not None:
         v = df["market_value_eur"]
-        rule("budget", v.notna() & (v > b.max_value_eur), int(v.isna().sum()))
+        rule("budget / hidden cap (unknown fails)", v.isna() | (v > cap))
     now_lg = df["current_league"] if "current_league" in df else df["league"]
     now_club = df["current_club"] if "current_club" in df else df["team"]
     if b.leagues:

@@ -78,7 +78,9 @@ UNMEASURED = ("adaptab", "versatil", "any formation", "formations", "any system"
               "leader", "mentality", "attitude", "pace", "pacey", "fast", "quick", "physical", "tall", "saves",
               "shot-stopp", "keeper", "goalkeeper")
 HIDDEN = ("hidden", "unknown", "under the radar", "under-the-radar", "bargain", "undervalued", "underrated",
-          "cheap", "value for money", "gem", "unexpected")
+          "cheap", "value for money", "gem", "unexpected", "underexplored", "under-explored", "unexplored",
+          "overlooked", "off the radar", "lesser known", "lesser-known", "not well known", "under the radar",
+          "unheralded", "undiscovered", "not the obvious")
 CLUB_ALIASES = {"man city": "Manchester City", "man utd": "Manchester United", "man united": "Manchester United",
                 "spurs": "Tottenham", "psg": "Paris Saint Germain", "barca": "Barcelona", "bayern": "Bayern Munich",
                 "dortmund": "Borussia Dortmund", "bvb": "Borussia Dortmund", "leverkusen": "Bayer Leverkusen",
@@ -87,17 +89,85 @@ CLUB_ALIASES = {"man city": "Manchester City", "man utd": "Manchester United", "
                 "forest": "Nottingham Forest", "leipzig": "RasenBallsport Leipzig", "rb leipzig": "RasenBallsport Leipzig"}
 MONEY = re.compile(r"(?:[€£$]\s*(\d+(?:\.\d+)?)\s*(m|mn|million|k|bn)?\b)|(?:\b(\d+(?:\.\d+)?)\s*(m|mn|million|k)\b)")
 NAME_PATTERNS = (
-    r"replac(?:e|ing|ement for)\s+(?P<n>[^,.;:]+?)(?=\s+(?:with|who|that|but|for|at|from|in|under|younger|older|,)|[,.;:]|$)",
-    r"(?:similar to|plays like|like|same as)\s+(?P<n>[^,.;:]+?)(?=\s+(?:with|who|that|but|for|at|from|in|under|younger|older|,)|[,.;:]|$)",
-    r"(?:the next|a new|another)\s+(?P<n>[^,.;:]+?)(?=\s*[,.;:]|\s+(?:with|who|for|at|under)|$)",
+    r"replac(?:e|ing|ement for)\s+(?P<n>[^,.;:]+?)(?=\s+(?:(?:with|who|that|but|for|at|from|in|under|younger|older)\b|,)|[,.;:]|$)",
+    r"(?:similar to|plays like|like|same as)\s+(?P<n>[^,.;:]+?)(?=\s+(?:(?:with|who|that|but|for|at|from|in|under|younger|older|to|and)\b|,)|[,.;:]|$)",
+    r"(?:the next|a new|another)\s+(?P<n>[^,.;:]+?)(?=\s*[,.;:]|\s+(?:with|who|for|at|under)\b|$)",
     r"(?P<n>[A-Z][\w'\-]+(?:\s+[A-Z][\w'\-]+)*)\s+(?:type|clone|style|-style|lookalike)\b",
     r"(?P<n>[A-Z][\w'\-]+(?:\s+[A-Z][\w'\-]+)*)\s+(?:replacement|successor)\b",
     r"(?:back-?up|cover|understudy|deputy|successor|alternative|replacement|competition|heir)\s+(?:for|to|of)\s+"
-    r"(?P<n>[^,.;:]+?)(?=\s+(?:with|who|that|but|for|at|from|in|under|younger|older|a|an|,)|[,.;:]|$)",
+    r"(?P<n>[^,.;:]+?)(?=\s+(?:(?:with|who|that|but|for|at|from|in|under|younger|older|a|an)\b|,)|[,.;:]|$)",
     r"\b(?:a|an)\s+(?:younger|cheaper|better|faster|new|budget|poor man's|discount)\s+(?:version of\s+)?"
-    r"(?P<n>[^,.;:]+?)(?=\s+(?:with|who|that|but|for|at|from|in|under|,)|[,.;:]|$)",
+    r"(?P<n>[^,.;:]+?)(?=\s+(?:(?:with|who|that|but|for|at|from|in|under)\b|,)|[,.;:]|$)",
 )
-LIKE_PATTERNS = {1, 3}      # NAME_PATTERNS that name a style reference rather than the player to replace
+NAME_PATTERNS = NAME_PATTERNS + (
+    r"(?:style|flair|qualities|profile|ability|abilities|traits|game|skills?|vision|technique|instincts|mould|mold)"
+    r"\s+(?:\w+\s+){0,3}?of\s+(?:a\s+(?:young|modern)\s+)?(?P<n>[^,.;:]+?)(?=\s+(?:(?:in|with|who|that|but|for|at|and|to)\b|,)|[,.;:]|$)",
+    r"\b(?:a|the)\s+(?:modern|modern-day|new|next|young)\s+(?P<n>[^,.;:]+?)(?=\s+(?:(?:in|with|who|that|but|for|at|and|to)\b|,)|[,.;:]|$)",
+)
+LIKE_PATTERNS = {1, 3, 7, 8}  # NAME_PATTERNS that name a style reference rather than the player to replace
+REPLACE_WORDS = r"replac|successor|cover|back-?up|understudy|heir|instead of"
+HIDDEN_MAX_VALUE = 35e6       # 'hidden / underexplored' without a budget: leave out the famous, expensive names
+
+# Famous players the data does not have (retired, or before 2014): what they were known for, so 'the flair
+# of Kaka' still means something. (positions, qualities = EMPHASIS labels)
+ARCHETYPES: Dict[str, Tuple[List[str], List[str]]] = {
+    "kaka": (["attacking_mid"], ["goal threat", "dribbling / take-ons", "build-up / progression"]),
+    "zidane": (["attacking_mid"], ["ball security / technique", "dribbling / take-ons", "chance creation"]),
+    "ronaldinho": (["attacking_mid", "winger"], ["dribbling / take-ons", "chance creation", "goal threat"]),
+    "riquelme": (["attacking_mid"], ["chance creation", "ball security / technique"]),
+    "ozil": (["attacking_mid"], ["chance creation", "ball security / technique"]),
+    "totti": (["attacking_mid", "striker"], ["goal threat", "chance creation"]),
+    "del piero": (["striker", "attacking_mid"], ["goal threat", "chance creation"]),
+    "pirlo": (["defensive_mid"], ["build-up / progression", "chance creation", "ball security / technique"]),
+    "xavi": (["central_mid"], ["ball security / technique", "build-up / progression", "chance creation"]),
+    "iniesta": (["central_mid", "attacking_mid"], ["dribbling / take-ons", "ball security / technique", "chance creation"]),
+    "busquets": (["defensive_mid"], ["ball security / technique", "build-up / progression", "defending"]),
+    "makelele": (["defensive_mid"], ["ball winning / work rate", "defending", "ball security / technique"]),
+    "vieira": (["central_mid", "defensive_mid"], ["ball winning / work rate", "defending", "build-up / progression"]),
+    "gerrard": (["central_mid"], ["goal threat", "shooting volume", "build-up / progression"]),
+    "lampard": (["central_mid", "attacking_mid"], ["goal threat", "shooting volume"]),
+    "scholes": (["central_mid"], ["build-up / progression", "ball security / technique", "shooting volume"]),
+    "schweinsteiger": (["central_mid"], ["build-up / progression", "ball winning / work rate"]),
+    "fabregas": (["central_mid", "attacking_mid"], ["chance creation", "build-up / progression"]),
+    "henry": (["striker", "winger"], ["goal threat", "dribbling / take-ons", "chance creation"]),
+    "drogba": (["striker"], ["goal threat", "aerial ability", "shooting volume"]),
+    "ronaldo nazario": (["striker"], ["goal threat", "dribbling / take-ons", "shooting volume"]),
+    "van persie": (["striker"], ["goal threat", "shooting volume", "chance creation"]),
+    "robben": (["winger"], ["goal threat", "dribbling / take-ons", "shooting volume"]),
+    "ribery": (["winger"], ["dribbling / take-ons", "chance creation"]),
+    "beckham": (["winger"], ["chance creation"]),
+    "maldini": (["centre_back", "fullback"], ["defending", "ball security / technique"]),
+    "nesta": (["centre_back"], ["defending", "ball security / technique"]),
+    "terry": (["centre_back"], ["defending", "aerial ability"]),
+    "puyol": (["centre_back"], ["defending", "aerial ability"]),
+    "cafu": (["fullback"], ["chance creation", "dribbling / take-ons"]),
+    "roberto carlos": (["fullback"], ["chance creation", "shooting volume"]),
+}
+ARCHETYPE_ALIASES = {"ricardo kaka": "kaka", "zizou": "zidane", "r9": "ronaldo nazario", "il fenomeno": "ronaldo nazario",
+                     "thierry henry": "henry", "andrea pirlo": "pirlo", "xavi hernandez": "xavi", "andres iniesta": "iniesta",
+                     "steven gerrard": "gerrard", "frank lampard": "lampard", "paul scholes": "scholes",
+                     "claude makelele": "makelele", "patrick vieira": "vieira", "didier drogba": "drogba",
+                     "arjen robben": "robben", "franck ribery": "ribery", "paolo maldini": "maldini", "john terry": "terry",
+                     "carles puyol": "puyol", "david beckham": "beckham", "mesut ozil": "ozil", "cesc fabregas": "fabregas",
+                     "zinedine zidane": "zidane", "robin van persie": "van persie", "alessandro nesta": "nesta",
+                     "bastian schweinsteiger": "schweinsteiger", "sergio busquets": "busquets"}
+
+
+def archetype(name: str) -> Optional[str]:
+    """The ARCHETYPES key for a famous player the data lacks ('kaka', 'Kaká', 'Ricardo Kaka')."""
+    from forecast.service import _plain
+    n = _plain(name).strip()
+    n = ARCHETYPE_ALIASES.get(n, n)
+    return n if n in ARCHETYPES else None
+
+
+def apply_archetype(b: "Brief", key: str, display: str) -> None:
+    positions, qualities = ARCHETYPES[key]
+    b.archetype = display
+    for q in qualities:
+        add_emphasis(b, q)
+    if not b.positions:
+        b.positions = list(positions)
 
 
 EXPERIENCE_MINUTES = 1800      # "EPL experience": 20 full matches' worth, so a few cameos don't count
@@ -142,6 +212,8 @@ class Brief:
     partner_query: Optional[str] = None
     min_pass_pct: Optional[float] = None      # pass completion, 0-1 (FBref, last two seasons)
     positions_generic: bool = False           # only 'midfielder' was said: a style reference may widen it
+    style_ref: Optional[pd.Series] = None     # style reference when there is also a player to replace
+    archetype: Optional[str] = None           # a famous player the data lacks, read as his known qualities
 
     def describe(self) -> List[str]:
         out = []
@@ -152,6 +224,11 @@ class Brief:
             out.append(f"{what} {r['name']} ({r['team']}, {r['group']}{age})")
         elif self.replace_query:
             out.append(f"no player matched '{self.replace_query}' (ignored; try the full name)")
+        if self.style_ref is not None:
+            out.append(f"style like {self.style_ref['name']} ({self.style_ref['team']}, {self.style_ref['group']}; "
+                       "only players leaning his way)")
+        if self.archetype:
+            out.append(f"{self.archetype} is not in the data (retired or before 2014): read as his known qualities")
         if self.positions:
             out.append("position: " + ", ".join(p.replace("_", " ") for p in self.positions)
                        + " (half or more of his starts over the last two seasons)")
@@ -200,7 +277,12 @@ class Brief:
             out.append(f"projected {self.min_assists:g}+ assists next season (xA over his expected minutes)")
         if self.to_team and self.exclude_own_club:
             out.append(f"excluding {self.to_team}'s own players")
-        out.append("sorted by value gap (cheap for the output)" if self.sort == "value" else "sorted by projected output")
+        if self.sort == "value":
+            out.append("hidden talent: " + (f"value <= EUR {HIDDEN_MAX_VALUE / 1e6:g}M (no famous names), "
+                                            if self.max_value_eur is None else "")
+                       + "ranked on projected output and style")
+        else:
+            out.append("ranked on projected output" + (" and style" if self.replace is not None or self.style_ref is not None else ""))
         return out
 
 
@@ -219,11 +301,27 @@ STOP_NAMES = {"premier", "league", "liga", "serie", "ligue", "bundesliga", "euro
               "need", "want", "looking", "hidden", "young", "cheap", "who", "under", "max", "budget"}
 
 
-def _named(who: str, service) -> Optional[pd.Series]:
+def _plain_name(name: str) -> str:
+    from forecast.service import _plain
+    return _plain(name)
+
+
+def _player_in(text: str, service) -> Optional[str]:
+    """The player named at the end of a phrase: 'the underperforming cole palmer' -> 'cole palmer'.
+    Leading words are dropped one at a time; every remaining word must be in the player's name."""
+    words = text.split()
+    for k in range(min(len(words), 4)):
+        sub = " ".join(words[k:])
+        if sub and _named(sub, service, first_word=False) is not None:
+            return sub
+    return None
+
+
+def _named(who: str, service, first_word: bool = True) -> Optional[pd.Series]:
     """A player for a typed name, only if every typed word is in his name ('rice' -> Declan Rice;
     'rice at' never matches someone else by fuzz). Tries the full text, then its first word."""
     from forecast.service import _plain
-    for q in dict.fromkeys((who, who.split()[0] if who.split() else who)):
+    for q in dict.fromkeys((who, who.split()[0] if who.split() and first_word else who)):
         h = service.find(q)
         if h is not None and set(_plain(q).split()) <= set(_plain(h["name"]).split()):
             return h
@@ -330,20 +428,30 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
     raw = (text or "").strip()
     t = raw.lower()
 
-    # who to replace: explicit, else a pattern in the text
-    name = replace
-    if not name:
-        for i, pat in enumerate(NAME_PATTERNS):
-            m = re.search(pat, raw, flags=re.IGNORECASE if "[A-Z]" not in pat else 0)
-            if m and service.find(m.group("n").strip()) is not None:
-                name = m.group("n").strip()
-                b.anchor = "like" if i in LIKE_PATTERNS else "replacing"
-                break
-        if not name:
-            name = capitalised_player(raw, service)
-            if name:
-                b.anchor = ("replacing" if re.search(r"replac|successor|cover|back-?up|understudy|heir", t)
-                            and not re.search(re.escape(name.lower()) + r"[- ]?(?:style|type|like|esque)", t) else "like")
+    # who to replace and who to play like: both can be named ("the flair of Kaka ... to replace Palmer")
+    name, like_name, like_arch = replace, None, None
+    for i, pat in enumerate(NAME_PATTERNS):
+        for m in re.finditer(pat, raw, flags=re.IGNORECASE if "[A-Z]" not in pat else 0):
+            cand = _player_in(m.group("n").strip(), service)     # 'the underperforming cole palmer' -> 'cole palmer'
+            if i in LIKE_PATTERNS:
+                if like_name or like_arch:
+                    continue
+                key = archetype(m.group("n").strip()) or archetype(m.group("n").strip().split()[0] if m.group("n").split() else "")
+                if cand and (not name or _plain_name(cand) != _plain_name(name)):
+                    like_name = cand
+                elif key and not cand:
+                    like_arch = (key, m.group("n").strip())
+            elif name is None and cand:
+                name = cand
+    if name is None and like_name is not None:
+        name, like_name, b.anchor = like_name, None, "like"
+    elif name is not None and not replace:
+        b.anchor = "replacing"
+    if not name and not like_arch:
+        name = capitalised_player(raw, service)
+        if name:
+            b.anchor = ("replacing" if re.search(REPLACE_WORDS, t)
+                        and not re.search(re.escape(name.lower()) + r"[- ]?(?:style|type|like|esque)", t) else "like")
     if name:
         hit = service.find(name)
         if hit is None:
@@ -351,6 +459,12 @@ def parse(text: str, service, replace: Optional[str] = None) -> Brief:
         else:
             b.replace = hit
             t = t.replace(name.lower(), " ")
+    if like_name:
+        b.style_ref = _named(like_name, service)
+        t = t.replace(like_name.lower(), " ")
+    if like_arch:
+        apply_archetype(b, like_arch[0], like_arch[1].title())
+        t = t.replace(like_arch[1].lower(), " ")
 
     # club to project at
     b.to_team = find_club(t, service, raw=raw.replace(name, " ") if name else raw)
@@ -594,8 +708,7 @@ def apply_squad_role(b: Brief, upside: bool = False) -> None:
         b.min_minutes = max(b.min_minutes, 1800)
     elif b.squad_role in ("backup", "rotation"):
         b.min_minutes = min(b.min_minutes, 450)
-    if upside and b.max_age is None:
-        b.max_age = 24
+    # 'potential / upside / bursting with talent' does not set an age cap: the user didn't give one
 
 
 EMPHASIS_KEYS = {"build_up": "build-up / progression", "chance_creation": "chance creation",
@@ -683,14 +796,34 @@ def from_spec(spec, service, text: str = "", replace: Optional[str] = None) -> B
     """Check an LLM reading against the data: the player and club must exist, roles and
     leagues come from fixed lists, and an age 'younger than him' is computed here."""
     b = Brief(text=text, parser="Gemini", interpretation=spec.interpretation)
-    name = replace or spec.replace_player or spec.similar_to
-    b.anchor = "replacing" if (replace or spec.replace_player) else "like"
+    rep = replace or spec.replace_player
+    name = rep or spec.similar_to
+    b.anchor = "replacing" if rep else "like"
     if name:
-        hit = service.find(name)
-        if hit is None:
+        hit = _named(name, service, first_word=False)
+        hit = service.find(name) if hit is None else hit
+        if hit is None and not rep and (archetype(name) or spec.similar_to_traits):
+            pass                                  # a famous player the data lacks: his qualities, below
+        elif hit is None:
             b.replace_query = name
         else:
             b.replace = hit
+    if rep and spec.similar_to:                   # both: Palmer is replaced, Kaka sets the style
+        ref = _named(spec.similar_to, service, first_word=False)
+        if ref is not None and ref["us_id"] != (b.replace["us_id"] if b.replace is not None else None):
+            b.style_ref = ref
+    style_name = spec.similar_to if (spec.similar_to and b.style_ref is None
+                                     and (rep or b.replace is None)) else None
+    if style_name:
+        key = archetype(style_name)
+        if key:
+            apply_archetype(b, key, style_name)
+        elif spec.similar_to_traits:
+            b.archetype = style_name
+            for q in spec.similar_to_traits:
+                add_emphasis(b, EMPHASIS_KEYS[q])
+            if not spec.positions and spec.similar_to_position:
+                b.positions = [spec.similar_to_position]
     if spec.target_club:
         row = service._team_row(spec.target_club)
         club = row["team"] if row is not None else find_club(spec.target_club, service, require_preposition=False)
@@ -783,10 +916,11 @@ def profile(b: Brief, service) -> Tuple[RoleProfile, Optional[np.ndarray]]:
     emph = np.array([sum(d.get(m, 0.0) for d in dists) for m in METRICS])
     emph = emph / np.linalg.norm(emph) if emph.sum() > 0 else None     # retrieval direction (model metrics)
 
-    if b.replace is not None:
+    anchor = b.style_ref if b.style_ref is not None else b.replace
+    if anchor is not None:
         ref = service.in_latest_season(service.ps)
-        per90 = {m: float(b.replace[f"{m}_p90"]) for m in METRICS}
-        own = style_vector(per90, scales, group_centres(ref).get(b.replace["group"]))
+        per90 = {m: float(anchor[f"{m}_p90"]) for m in METRICS}
+        own = style_vector(per90, scales, group_centres(ref).get(anchor["group"]))
         # rank on what he does MORE than a typical player in his position; if he is below
         # average at everything, fall back to the plain shape of his output
         weights = np.clip(own, 0, None)
@@ -796,8 +930,8 @@ def profile(b: Brief, service) -> Tuple[RoleProfile, Optional[np.ndarray]]:
             rw = np.array([role.weights.get(m, 0.0) for m in METRICS])
             weights = 0.5 * weights / max(weights.sum(), 1e-9) + 0.5 * rw / max(rw.sum(), 1e-9)
         target = own if emph is None else own + emph
-        groups = tuple(dict.fromkeys((b.replace["group"],) + (role.groups if role is not None else ())))
-        label = f"{b.replace['name']}-like" + (f" {role.label.lower()}" if role else "")
+        groups = tuple(dict.fromkeys((anchor["group"],) + (role.groups if role is not None else ())))
+        label = f"{anchor['name']}-like" + (f" {role.label.lower()}" if role else "")
     else:
         if role is None and (b.positions or b.emphasis):
             # a position without a role: its default role, so the search always has a profile
@@ -876,21 +1010,23 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
     from forecast.roles import role_scores
     prof, target = profile(b, service)
     thresholds = b.min_goals is not None or b.min_assists is not None or bool(b.beat)
-    pool_n = max(n * 6, 120) if thresholds else (max(n, 25) if b.sort == "value" else n)
+    pool_n = max(n * 6, 120) if thresholds else n
+    cap = b.max_value_eur if b.max_value_eur is not None else (HIDDEN_MAX_VALUE if b.sort == "value" else None)
     positions = b.positions or ROLE_POSITIONS.get(b.role or "", [])
     subs = {s for p in positions for s in POSITIONS[p]}
     if b.side and b.side_strict:
         subs = (subs & set(SIDES[b.side])) or set(SIDES[b.side])
     also = {s for p in b.also_positions for s in POSITIONS[p]}
-    excl_ids = ([b.replace["us_id"]] if b.replace is not None else []) + [p["us_id"] for p, _ in b.beat]
+    excl_ids = ([b.replace["us_id"]] if b.replace is not None else []) + [p["us_id"] for p, _ in b.beat] \
+        + ([b.style_ref["us_id"]] if b.style_ref is not None else [])
     df = service.candidates(prof, n=pool_n, to_team=b.to_team, max_age=b.max_age,
-                            min_age=b.min_age, max_value_eur=b.max_value_eur, min_minutes=b.min_minutes,
+                            min_age=b.min_age, max_value_eur=cap, min_minutes=b.min_minutes,
                             leagues=b.leagues, exclude=exclude, exclude_ids=excl_ids, target=target,
                             sub_positions=subs or None, also_positions=also or None,
                             min_also_share=ALSO_SHARE,
                             experience=(b.experience_leagues, b.experience_minutes) if b.experience_leagues else None,
                             penalty_taker=b.penalty_taker, min_pass_pct=b.min_pass_pct,
-                            style_match=b.anchor == "like" and b.replace is not None,
+                            style_match=b.replace is not None or b.style_ref is not None,
                             exclude_teams=[b.to_team] if b.to_team and b.exclude_own_club else ())
     bars = []                                  # (label, metric, per-90 bar) from players to out-produce
     for p, m in b.beat:
@@ -924,6 +1060,6 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
             b.note = "Nobody is projected to reach that target; showing the closest."
             key = (f"pred_{bars[0][1]}" if bars else "proj_goals" if b.min_goals is not None else "proj_assists")
             df = df.sort_values(key, ascending=False).reset_index(drop=True)
-    if not df.empty and b.sort == "value":
-        df = df.sort_values("value_gap", ascending=False, na_position="last")
+    # 'hidden / bargain' already capped the price; within that, rank on fit (output + style), since
+    # a value-gap sort put off-profile players first
     return df.head(n).reset_index(drop=True), him, prof
