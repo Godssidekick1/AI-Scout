@@ -60,18 +60,34 @@ def rows_from_raw(raw: Iterable[Dict], league: str, season: int) -> List[Dict]:
 
 
 async def load_seasons(seasons: Iterable[int], leagues: Iterable[str] = LEAGUES,
-                       concurrency: int = 3) -> pd.DataFrame:
-    """Fetch every (league, season) and return one DataFrame of player-season totals."""
+                       concurrency: int = 3, offline: bool = False) -> pd.DataFrame:
+    """Fetch every (league, season) and return one DataFrame of player-season totals.
+    Cached seasons are read from disk. If anything is missing, one quick request checks the site
+    first; when it is down (or `offline`), the build uses what the cache has and says what is missing."""
+    from data_sources.understat_source import UNDERSTAT_LEAGUES
+    seasons, leagues = list(seasons), list(leagues)
     current = current_understat_season()
     history_cache = DataCache(cache_dir=str(settings.cache_path), ttl_hours=24 * 365 * 100)   # finished seasons never change
     live_cache = DataCache(cache_dir=str(settings.cache_path), ttl_hours=settings.CACHE_TTL_HOURS)
     sem = asyncio.Semaphore(concurrency)
 
+    def cached(lg: str, s: int) -> bool:
+        key = f"understat:league:{UNDERSTAT_LEAGUES.get(lg)}:{s}"
+        return (live_cache if s >= current else history_cache).get(key) is not None
+    missing = [(lg, s) for s in seasons for lg in leagues if not cached(lg, s)]
+    if offline:
+        UnderstatSource.site_down = "offline (--offline)"
+    elif missing:
+        down = await UnderstatSource.probe()
+        if down:
+            logger.warning("Understat is down (%s): building from the cache. Not cached, so left out: %s",
+                           down, ", ".join(f"{lg} {s}" for lg, s in missing))
+
     async def one(league: str, season: int) -> List[Dict]:
         source = UnderstatSource(cache=live_cache if season >= current else history_cache, season=season)
         async with sem:
             raw = await source._fetch_league_raw(league)
-        if not raw:
+        if not raw and not UnderstatSource.site_down:
             logger.warning("Understat: no data for %s %s", league, season)
         return rows_from_raw(raw, league, season)
 

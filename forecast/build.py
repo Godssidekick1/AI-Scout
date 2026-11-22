@@ -76,11 +76,11 @@ def add_defensive(ps: pd.DataFrame, us: pd.DataFrame, seasons: List[int]) -> pd.
 
 
 def load_real(seasons: List[int], elo_source: str = "auto",
-              defensive: bool = True) -> Tuple[pd.DataFrame, Dict[str, float], pd.DataFrame]:
+              defensive: bool = True, offline: bool = False) -> Tuple[pd.DataFrame, Dict[str, float], pd.DataFrame]:
     from forecast.data import clubelo, transfermarkt
     from forecast.data.understat_history import load_seasons
 
-    us = asyncio.run(load_seasons(seasons))
+    us = asyncio.run(load_seasons(seasons, offline=offline))
     if us.empty:
         raise SystemExit("No Understat data loaded. Is understat.com reachable from here?")
     logger.info("Understat: %d player-season rows", len(us))
@@ -211,6 +211,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                     help="team ratings: ClubElo, Elo from match results, or ClubElo with results as fallback")
     ap.add_argument("--first-season", type=int, default=2014)
     ap.add_argument("--no-defensive", action="store_true", help="skip the defensive/duel data sources")
+    ap.add_argument("--offline", action="store_true",
+                    help="Understat from the local cache only (no requests to understat.com)")
     ap.add_argument("--test-seasons", type=int, default=4, help="how many recent completed seasons to test on")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -223,7 +225,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.synthetic:
         ps, values, profiles = load_synthetic()
     else:
-        ps, values, profiles = load_real(list(range(args.first_season, current + 1)), args.elo, not args.no_defensive)
+        ps, values, profiles = load_real(list(range(args.first_season, current + 1)), args.elo, not args.no_defensive,
+                                         args.offline)
 
     pairs = season_pairs(ps)
     completed = pairs[pairs["target_season"] < current] if not args.synthetic else pairs

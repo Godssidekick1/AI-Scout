@@ -76,6 +76,22 @@ def position_matches(understat_position: str, requested: str) -> bool:
 class UnderstatSource(BaseSource):
     source_name = "understat"
     BASE_URL = "https://understat.com"
+    # Set once the site is seen to be down (maintenance page, or no answer), so the rest of the run
+    # uses the cache instead of waiting on every league-season in turn.
+    site_down: Optional[str] = None
+
+    @classmethod
+    async def probe(cls) -> Optional[str]:
+        """One quick request (no retries). Returns None if Understat answers with data pages,
+        otherwise why it is down, and remembers that for the rest of the run."""
+        resp = await http_request("GET", f"{cls.BASE_URL}/league/EPL", retries=0)
+        if resp is None:
+            cls.site_down = "no answer"
+        elif cls.is_maintenance_page(resp.text):
+            cls.site_down = "maintenance page"
+        else:
+            cls.site_down = None
+        return cls.site_down
 
     def __init__(self, cache: Optional[DataCache] = None, season: Optional[int] = None):
         self.cache = cache or DataCache()
@@ -102,7 +118,7 @@ class UnderstatSource(BaseSource):
         if cached is not None:
             return cached.get("players", [])
 
-        players = await self._fetch_json_api(slug) or await self._fetch_html(slug)
+        players = [] if UnderstatSource.site_down else (await self._fetch_json_api(slug) or await self._fetch_html(slug))
         if players:
             self.cache.set(cache_key, {"players": players})
             return players
@@ -110,7 +126,7 @@ class UnderstatSource(BaseSource):
         if stale is not None:
             logger.warning("Understat: %s %s unreachable, using the cached copy", slug, self.season)
             return stale.get("players", [])
-        logger.warning("Understat: no data for %s %s", slug, self.season)
+        logger.debug("Understat: no data for %s %s", slug, self.season)
         return players
 
     async def _fetch_json_api(self, slug: str) -> List[Dict]:
@@ -130,7 +146,9 @@ class UnderstatSource(BaseSource):
         if resp is None:
             return []
         if self.is_maintenance_page(resp.text):
-            logger.warning("Understat is showing its maintenance page ('We will come back soon'); try again later")
+            if not UnderstatSource.site_down:
+                logger.warning("Understat is showing its maintenance page ('We will come back soon'); using the cache")
+            UnderstatSource.site_down = "maintenance page"
             return []
         return self.parse_embedded_html(resp.text)
 
