@@ -150,6 +150,7 @@ REAL_PLAYERS = [   # (name, group, club, Transfermarkt position): the players th
     ("Cole Palmer", "AM", "Chelsea", "Attacking Midfield"), ("Ousmane Dembélé", "AM", "Paris Saint Germain", "Right Winger"),
     ("Alejandro Grimaldo", "FB", "Bayer Leverkusen", "Left-Back"), ("Erling Haaland", "ST", "Manchester City", "Centre-Forward"),
     ("Khvicha Kvaratskhelia", "AM", "Napoli", "Left Winger"),
+    ("Arda Güler", "AM", "Real Madrid", "Attacking Midfield"), ("Declan Rice", "CM", "Arsenal", "Defensive Midfield"),
 ]
 
 

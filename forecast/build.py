@@ -50,6 +50,13 @@ def add_defensive(ps: pd.DataFrame, us: pd.DataFrame, seasons: List[int]) -> pd.
         agg["birth_year"] = agg["us_id"].map(born)
         linked = defensive.link(rows, agg)
         ps = defensive.add_rates(ps, defensive.player_season_table(linked))
+        try:      # on-the-ball rates: their own link, since FBref passing covers seasons its defense table doesn't
+            from forecast.data import fbref_stats
+            ball = defensive.link(fbref_stats.load_ball(seasons), agg)
+            ps = defensive.add_ball(ps, defensive.ball_table(ball))
+            logger.info("Passing/take-ons: linked %d of %d FBref rows", int(ball["us_id"].notna().sum()), len(ball))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Passing and take-on data skipped: %s", e)
     except Exception as e:  # noqa: BLE001
         logger.warning("Defensive data skipped: %s", e)
         DEF_REPORT["text"] = f"Defensive data: not loaded ({str(e)[:160]})."
@@ -161,6 +168,7 @@ def load_synthetic(seed: int = 7) -> Tuple[pd.DataFrame, Dict[str, float], pd.Da
     ps = player_seasons(us, tm, us_to_tm, team_elo)
     from forecast.data import defensive
     ps = defensive.add_rates(ps, defensive.synthetic_table(ps, seed))
+    ps = defensive.add_ball(ps, defensive.synthetic_ball(ps, seed))
     rng = np.random.default_rng(seed)
     values = {u: float(np.exp(rng.normal(16, 1))) for u in ps["us_id"].unique()}
     return ps, values, synthetic.profiles(ps, seed)

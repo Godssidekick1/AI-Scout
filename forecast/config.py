@@ -13,17 +13,24 @@ METRICS: Tuple[str, ...] = ("npxG", "xA", "shots", "key_passes", "xGChain", "xGB
 # for the Premier League), too short for the season-pair model, so roles use recent observed
 # rates shrunk toward the position mean.
 DEF_METRICS: Tuple[str, ...] = ("tackles", "interceptions", "tkl_int", "blocks", "clearances", "aerials_won",
-                                "aerials", "recoveries", "duels_won", "prog_passes", "prog_carries")
+                                "aerials", "recoveries", "duels_won", "prog_passes", "prog_carries", "take_ons_won")
 # success ratios: name -> (numerator, denominator) over the season totals
 DEF_RATIOS: Dict[str, Tuple[str, str]] = {"aerial_win_pct": ("aerials_won", "aerials"),
                                           "tackle_win_pct": ("tackles_won", "tackles"),
-                                          "duel_win_pct": ("duels_won", "duels")}
+                                          "duel_win_pct": ("duels_won", "duels"),
+                                          "pass_pct": ("passes_completed", "passes_attempted"),
+                                          "take_on_pct": ("take_ons_won", "take_ons")}
+# On-the-ball totals (FBref passing and possession tables). Kept apart from the defensive totals: FBref's
+# passing table covers seasons its defense table doesn't (all of 2024-25), so they are linked on their own.
+BALL_TOTALS: Tuple[str, ...] = ("passes_completed", "passes_attempted", "take_ons_won", "take_ons")
+BALL_RATES: Tuple[str, ...] = ("take_ons_won_p90", "pass_pct", "take_on_pct")
 DEF_LABELS: Dict[str, str] = {
     "tackles": "tackles", "interceptions": "interceptions", "tkl_int": "tackles + interceptions",
     "blocks": "blocks", "clearances": "clearances", "aerials_won": "aerials won", "aerials": "aerial duels",
     "recoveries": "ball recoveries", "duels_won": "duels won", "prog_passes": "progressive passes",
     "prog_carries": "progressive carries", "aerial_win_pct": "aerial win %", "tackle_win_pct": "tackle win %",
-    "duel_win_pct": "duel win %"}
+    "duel_win_pct": "duel win %", "take_ons_won": "successful take-ons", "pass_pct": "pass completion %",
+    "take_on_pct": "take-on success %"}
 
 # v3 scope: the big five. Keys match data_sources.understat_source.UNDERSTAT_LEAGUES.
 LEAGUES: Tuple[str, ...] = ("premier_league", "la_liga", "bundesliga", "serie_a", "ligue_1")

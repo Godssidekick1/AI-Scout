@@ -234,8 +234,10 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
     facts = [(c, h) for c, h, on in (("position_share", "at pos", "position_share" in df),
                                      ("also_share", "also", "also_share" in df),
                                      ("experience_minutes", "exp min", bool(b.experience_leagues)),
-                                     ("pens", "pens", b.penalty_taker)) if on and c in df]
-    score_col = "vs him" if him is not None else "score"
+                                     ("pens", "pens", b.penalty_taker),
+                                     ("def_pass_pct", "pass%", b.min_pass_pct is not None)) if on and c in df]
+    vs = him is not None and b.anchor == "replacing"     # 'like X' is a style, not a bar to clear
+    score_col = "vs him" if vs else "score"
     head = (f"{'#':>3}  {'player':<23}{'club':<19}{'lg':<7}{'pos':<4}{'age':>4}{'min':>6}{'style':>6}{score_col:>7}"
             f"{'gap':>6}{'EUR M':>7}" + "".join(f"{m[:9]:>10}" for m in shown)
             + "".join(f"{c[5:]:>8}" for c in extra) + "".join(f"{h:>8}" for _, h in facts))
@@ -255,7 +257,7 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
             v = r.get(c, np.nan)
             if pd.isna(v):
                 return f"{'':>8}"
-            return f"{v:>8.0%}" if c.endswith("share") else f"{v:>8.0f}"
+            return f"{v:>8.0%}" if c.endswith(("share", "_pct")) else f"{v:>8.0f}"
         return (f"{i:>3}  {str(r['name'])[:22]:<23}{club:<19}{LEAGUE_SHORT.get(lg, str(lg))[:6]:<7}"
                 f"{pos:<4}{age:>4}{r['minutes']:>6.0f}{sty:>6}{score:>7}{gap:>6}{val:>7}"
                 + "".join(f"{metric_value(r, m):>10}" for m in shown)
@@ -263,14 +265,15 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
                 + "".join(fact(c) for c, _ in facts))
 
     if him is not None:
-        print(line("him", him, "0.00"))
+        print(line("him" if vs else "ref", him, "0.00" if vs else f"{him['role_score']:.2f}"))
     for i, r in df.iterrows():
-        score = r["role_score"] - him["role_score"] if him is not None else r["role_score"]
-        print(line(i + 1, r, f"{score:+.2f}" if him is not None else f"{score:.2f}"))
+        score = r["role_score"] - him["role_score"] if vs else r["role_score"]
+        print(line(i + 1, r, f"{score:+.2f}" if vs else f"{score:.2f}"))
     at = f" at {b.to_team}" if b.to_team else ""
-    print(f"\nstyle = how alike the shape of their output is (100 = identical). "
+    print(f"\nstyle = how alike the shape of their output is, each compared with his position's average "
+          "(100 = same profile, 50 = unrelated, 0 = opposite). "
           + ("vs him = projected output in this profile next season" + at + ", minus his (0 = as good as him), "
-             if him is not None else "score = projected output in this profile next season" + at
+             if vs else "score = projected output in this profile next season" + at
              + " (0 = average in the role), ")
           + "in standard deviations. gap = value gap: positive = cheap for that output. "
             "Metric columns are projected per-90 next season"
@@ -281,6 +284,8 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
           + (" * = moved since the last season in the data; club and league are his current ones (Transfermarkt), "
              "his stats are from his old club." if "moved" in df and df["moved"].any() else "")
           + (" at pos = share of his recent starts in the position asked for." if any(c == "position_share" for c, _ in facts) else "")
+          + (" pass% = pass completion over his last two seasons with FBref data." if b.min_pass_pct is not None else "")
+          + (f" ref = {him['name']}, the style reference, scored the same way." if him is not None and not vs else "")
           + (" exp min = career minutes in that league." if b.experience_leagues else "")
           + (" pens = penalties taken, last two seasons." if b.penalty_taker else "") + "\n"
           f"Drill into one:  python -m forecast.predict player \"{df.iloc[0]['name']}\""

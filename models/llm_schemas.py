@@ -36,7 +36,7 @@ class SearchConstraints(BaseModel):
 
 
 EmphasisKey = Literal["build_up", "chance_creation", "goal_threat", "shooting", "involvement",
-                      "defending", "aerial", "ball_winning"]
+                      "defending", "aerial", "ball_winning", "dribbling", "ball_security"]
 PositionKey = Literal["winger", "striker", "attacking_mid", "central_mid", "defensive_mid", "fullback", "centre_back"]
 
 
@@ -59,8 +59,10 @@ class BriefSpec(BaseModel):
                                          "(inside, inverted, wide forward) is winger, never striker.")
     also_positions: List[PositionKey] = Field(default_factory=list, description="Positions he must ALSO be able to "
                                               "play: 'a goalscoring midfielder who can play holding mid' -> positions "
-                                              "[central_mid], also_positions [defensive_mid]. Not for emergency cover "
-                                              "('if forced', 'at a push'): put that in unmeasured.")
+                                              "[central_mid], also_positions [defensive_mid]. Only when the user names "
+                                              "a second position he must play. 'Backup for X' or 'alongside X' is NOT "
+                                              "an also_position. Not for emergency cover ('if forced', 'at a push'): "
+                                              "put that in unmeasured.")
     side: Optional[Literal["left", "right"]] = Field(default=None, description="Side mentioned ('can play on the "
                                                      "left', 'left winger').")
     side_only: bool = Field(default=False, description="True only if the player must play that side ('a left "
@@ -82,6 +84,8 @@ class BriefSpec(BaseModel):
                                         "assists, key passes), goal_threat (goals, finishing), shooting (shot volume), "
                                         "involvement (link-up, combination play), defending (tackling, interceptions, tracking back, "
                                         "reliable defensively, holds his ground), aerial (in the air, heading), "
+                                        "dribbling (take-ons, beats his man, 1v1, carries the ball), ball_security "
+                                        "(technical, press-resistant, tidy, pass accuracy), "
                                         "ball_winning (pressing, work rate, winning the ball back).")
     min_age: Optional[int] = Field(default=None, description="Minimum age in years. 'between 25-30' means 25.")
     max_age: Optional[int] = Field(default=None, description="Maximum age in years. 'under 25' means 24, 'u21' means 21.")
@@ -100,6 +104,14 @@ class BriefSpec(BaseModel):
     experience_min_minutes: Optional[int] = Field(default=None, description="Career minutes needed in that league, "
                                                   "only if stated ('50+ Premier League games' -> 4000). Default 1800.")
     penalty_taker: bool = Field(default=False, description="True when he should take penalties.")
+    partner_player: Optional[str] = Field(default=None, description="Player he would play ALONGSIDE: 'partner for "
+                                          "Saliba', 'play next to Rice', 'or play alongside him' (him = the player "
+                                          "named just before). Not the player he replaces.")
+    min_pass_completion_pct: Optional[float] = Field(default=None, description="Minimum pass completion in per cent, "
+                                                     "only if stated ('at least 85% pass success' -> 85).")
+    position_is_generic: bool = Field(default=False, description="True when the user said only 'midfielder', "
+                                      "'midfield player' or similar with no specific role (6, 8, 10, holding, "
+                                      "box-to-box, attacking); positions is then [central_mid].")
     min_minutes: Optional[int] = Field(default=None, description="Minimum league minutes last season: 1800 for "
                                        "'reliable', 'regular starter', 'proven'; 450 for a squad or rotation player.")
     min_goals: Optional[float] = Field(default=None, description="League goals per season the user requires ('15+ goals').")

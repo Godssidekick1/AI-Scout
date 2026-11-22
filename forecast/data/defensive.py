@@ -37,7 +37,7 @@ import pandas as pd
 from thefuzz import fuzz
 
 from config import settings
-from forecast.config import DEF_METRICS, DEF_RATIOS, LEAGUES
+from forecast.config import BALL_RATES, BALL_TOTALS, DEF_METRICS, DEF_RATIOS, LEAGUES
 
 logger = logging.getLogger(__name__)
 
@@ -275,35 +275,60 @@ def add_rates(ps: pd.DataFrame, table: pd.DataFrame) -> pd.DataFrame:
 
 def derived_totals(df: pd.DataFrame) -> Dict[str, np.ndarray]:
     get = lambda c: df[c].to_numpy(float) if c in df else np.full(len(df), np.nan)
-    d = {c: get(c) for c in TOTALS}
+    d = {c: get(c) for c in (*TOTALS, *BALL_TOTALS)}
     d["tkl_int"] = d["tackles"] + d["interceptions"]
     d["aerials"] = d["aerials_won"] + d["aerials_lost"]
     d["duels"] = d["duels_won"] + d["duels_lost"]
     return d
 
 
-def recent_rates(ps: pd.DataFrame, latest: pd.DataFrame, seasons_back: int = 2) -> pd.DataFrame:
+def ball_table(linked: pd.DataFrame) -> pd.DataFrame:
+    """FBref on-the-ball rows linked to Understat -> one row per (us_id, season)."""
+    df = linked[linked["us_id"].notna()]
+    cols = ["pass_minutes", "take_minutes", *BALL_TOTALS]
+    if df.empty:
+        return pd.DataFrame(columns=["us_id", "season", "ball_minutes", *cols])
+    out = df.groupby(["us_id", "season"], as_index=False).agg(
+        ball_minutes=("minutes", "sum"), **{c: (c, lambda x: x.sum(min_count=1)) for c in cols})
+    return out
+
+
+def add_ball(ps: pd.DataFrame, table: pd.DataFrame) -> pd.DataFrame:
+    """Join on-the-ball totals and rates: pass completion (50+ attempts), take-on success (5+) and
+    successful take-ons per 90 (over the possession table's minutes)."""
+    drop = [c for c in ("ball_minutes", "pass_minutes", "take_minutes", *BALL_TOTALS, *BALL_RATES) if c in ps]
+    ps = ps.drop(columns=drop).merge(table, on=["us_id", "season"], how="left")
+    att, cmp_ = ps["passes_attempted"].to_numpy(float), ps["passes_completed"].to_numpy(float)
+    ps["pass_pct"] = np.where(np.isfinite(att) & (att >= 50), cmp_ / np.where(att > 0, att, 1), np.nan)
+    tk, tw, tm = (ps[c].to_numpy(float) for c in ("take_ons", "take_ons_won", "take_minutes"))
+    ps["take_on_pct"] = np.where(np.isfinite(tk) & (tk >= 5), tw / np.where(tk > 0, tk, 1), np.nan)
+    ps["take_ons_won_p90"] = np.where(np.isfinite(tm) & (tm > 0), tw / np.where(tm > 0, tm, 1) * 90, np.nan)
+    return ps
+
+
+def recent_rates(ps: pd.DataFrame, latest: pd.DataFrame, seasons_back: int = 2,
+                 minutes_col: str = "def_minutes", cols=None, used_col: str = "def_minutes_used") -> pd.DataFrame:
     """Each latest-season player's defensive profile: minutes-weighted over his most recent
     `seasons_back` covered seasons (within the last MAX_LOOKBACK), shrunk toward his position group's mean so 300 good
     minutes don't top a list. Returns one row per us_id with `def_{metric}` columns and
     `def_minutes_used` (0 = no defensive data; his values are then the group mean)."""
-    cols = [f"{m}_p90" for m in DEF_METRICS] + list(DEF_RATIOS)
+    cols = cols or ([f"{m}_p90" for m in DEF_METRICS] + list(DEF_RATIOS))
     have = [c for c in cols if c in ps]
-    if not have or "def_minutes" not in ps:
+    if not have or minutes_col not in ps:
         return pd.DataFrame({"us_id": latest["us_id"]})
     last = int(latest["season"].max())
     # each player's most recent covered seasons (up to `seasons_back`), looking back at most
     # MAX_LOOKBACK seasons: where a league's coverage stops early (FBref ends in 2023-24) his
     # profile comes from his last covered seasons rather than from nothing
-    hist = ps[(ps["season"] > last - MAX_LOOKBACK) & ps["def_minutes"].gt(0)]
+    hist = ps[(ps["season"] > last - MAX_LOOKBACK) & ps[minutes_col].gt(0)]
     hist = hist[hist["us_id"].isin(set(latest["us_id"]))]
     hist = hist.sort_values("season", ascending=False).groupby("us_id").head(seasons_back)
-    prior = ps[ps["def_minutes"].gt(0)].groupby("group")[have].mean() if "group" in ps else None
+    prior = ps[ps[minutes_col].gt(0)].groupby("group")[have].mean() if "group" in ps else None
     out = []
     groups = dict(zip(latest["us_id"], latest.get("group", pd.Series([None] * len(latest)))))
     for us_id, g in hist.groupby("us_id"):
-        w = g["def_minutes"].to_numpy(float)
-        row = {"us_id": us_id, "def_minutes_used": float(w.sum()),
+        w = g[minutes_col].to_numpy(float)
+        row = {"us_id": us_id, used_col: float(w.sum()),
                "def_seasons": ",".join(str(int(s)) for s in sorted(g["season"].unique()))}
         for c in have:
             v = g[c].to_numpy(float)
@@ -316,9 +341,9 @@ def recent_rates(ps: pd.DataFrame, latest: pd.DataFrame, seasons_back: int = 2) 
             k = w[ok].sum()
             row[f"def_{c}"] = (obs * k + mu * PRIOR_MINUTES) / (k + PRIOR_MINUTES) if np.isfinite(mu) else obs
         out.append(row)
-    res = pd.DataFrame(out) if out else pd.DataFrame(columns=["us_id", "def_minutes_used"])
+    res = pd.DataFrame(out) if out else pd.DataFrame(columns=["us_id", used_col])
     res = pd.DataFrame({"us_id": latest["us_id"].unique()}).merge(res, on="us_id", how="left")
-    res["def_minutes_used"] = res["def_minutes_used"].fillna(0.0)
+    res[used_col] = res[used_col].fillna(0.0)
     if prior is not None:   # uncovered players: the group mean, flagged by def_minutes_used == 0
         for c in have:
             fill = res["us_id"].map(groups).map(prior[c]) if c in prior else np.nan
@@ -386,4 +411,21 @@ def synthetic_table(ps: pd.DataFrame, seed: int = 7) -> pd.DataFrame:
                      "recoveries": r * skill[5] * n90, "duels_won": (t + a) * 2 * skill[0] * n90,
                      "duels_lost": (t + a) * 2 * n90, "prog_passes": (4 if group in ("CB", "CM") else 2.5) * n90,
                      "prog_carries": 1.4 * n90})
+    return pd.DataFrame(rows)
+
+
+def synthetic_ball(ps: pd.DataFrame, seed: int = 7) -> pd.DataFrame:
+    """Plausible passing and take-on totals for the synthetic demo, by position."""
+    rng = np.random.default_rng(seed + 2)
+    base = {"CB": (55, 0.88, 0.4), "FB": (45, 0.80, 1.0), "CM": (55, 0.86, 1.0), "AM": (35, 0.79, 2.2),
+            "ST": (22, 0.72, 1.3)}       # passes attempted per 90, completion, take-ons won per 90
+    rows = []
+    for us_id, season, group, mins in zip(ps["us_id"], ps["season"], ps["group"], ps["minutes"]):
+        att, pct, tw = base.get(group, base["CM"])
+        n90 = mins / 90
+        p = float(np.clip(rng.normal(pct, 0.04), 0.5, 0.96))
+        won = tw * rng.lognormal(0, 0.35) * n90
+        rows.append({"us_id": us_id, "season": season, "ball_minutes": mins, "pass_minutes": mins, "take_minutes": mins,
+                     "passes_attempted": att * n90, "passes_completed": att * n90 * p,
+                     "take_ons_won": won, "take_ons": won / float(np.clip(rng.normal(0.5, 0.1), 0.2, 0.9))})
     return pd.DataFrame(rows)

@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, Iterable, List
 
+import numpy as np
 import pandas as pd
 
 from forecast.data.defensive import PoliteClient, frame
@@ -97,6 +98,41 @@ def load(seasons: Iterable[int]) -> pd.DataFrame:
                                               "aerials_won", "aerials_lost", "recoveries", "prog_passes",
                                               "prog_carries")}})
     return frame(rows)
+
+
+BALL_TABLES: Dict[str, Dict[str, str]] = {
+    "passing": {"Cmp_Total": "passes_completed", "Att_Total": "passes_attempted"},
+    "possession": {"Succ_Take": "take_ons_won", "Att_Take": "take_ons"},
+}
+
+
+def load_ball(seasons: Iterable[int]) -> pd.DataFrame:
+    """On-the-ball totals: passes completed/attempted and take-ons, one row per player per club per
+    league-season, with each table's own minutes (the passing table is complete for 2024-25, the
+    possession table is not, so take-on rates use the possession minutes)."""
+    wanted = {s + 1 for s in seasons}
+    merged = None
+    for name, cols in BALL_TABLES.items():
+        df = read_table(name)
+        df = df[df["Season_End_Year"].isin(wanted) & df["Comp"].isin(COMPS)]
+        have = [c for c in cols if c in df]
+        g = df.groupby(KEYS, as_index=False).agg(
+            name=("Player", "first"), born=("Born", "first"), **{f"{name}_n90": ("Mins_Per_90", "sum")},
+            **{cols[c]: (c, lambda x: x.sum(min_count=1)) for c in have})
+        merged = g if merged is None else merged.merge(g.drop(columns=["name", "born"]), on=KEYS, how="outer")
+        if "name" not in merged:
+            merged = merged.merge(g[KEYS + ["name", "born"]], on=KEYS, how="left")
+    if merged is None or merged.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "source": "fbref", "league": merged["Comp"].map(COMPS), "season": merged["Season_End_Year"].astype(int) - 1,
+        "src_id": merged["fbref_id"], "name": merged["name"], "team": merged["Squad"],
+        "birth_year": pd.to_numeric(merged["born"], errors="coerce"),
+        "minutes": merged["passing_n90"].fillna(merged.get("possession_n90")) * 90,
+        "pass_minutes": merged["passing_n90"] * 90, "take_minutes": merged.get("possession_n90", np.nan) * 90})
+    for c in ("passes_completed", "passes_attempted", "take_ons_won", "take_ons"):
+        out[c] = pd.to_numeric(merged[c], errors="coerce") if c in merged else np.nan
+    return out[out["minutes"] > 0].reset_index(drop=True)
 
 
 def check() -> str:

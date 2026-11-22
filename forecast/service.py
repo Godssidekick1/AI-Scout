@@ -41,6 +41,12 @@ def _plain(text: str) -> str:
     return "".join(c for c in t if not unicodedata.combining(c)).strip()
 
 
+def style_score(cos) -> np.ndarray:
+    """Cosine between style vectors (centred on the position's average, so -1..1) as 0-100:
+    100 = same shape, 50 = unrelated, 0 = the opposite profile."""
+    return np.round((np.asarray(cos, float) + 1) * 50).astype(float)
+
+
 def artifact_path() -> Path:
     return settings.cache_path / "forecast" / "service.pkl"
 
@@ -199,10 +205,16 @@ class ForecastService:
         cached = self.__dict__.get("_def_profile")
         if cached is not None:
             return cached
+        from forecast.config import BALL_RATES
         from forecast.data.defensive import recent_rates
         latest = self.in_latest_season(self.current())
         prof = recent_rates(self.ps, latest, seasons_back=3) if "def_minutes" in self.ps else pd.DataFrame(
             {"us_id": latest["us_id"]})
+        if "ball_minutes" in self.ps:   # passing and take-ons: last two seasons with FBref data, own minutes
+            ball = recent_rates(self.ps, latest, seasons_back=2, minutes_col="ball_minutes",
+                                cols=list(BALL_RATES), used_col="ball_minutes_used")
+            prof = prof.drop(columns=[f"def_{c}" for c in BALL_RATES if f"def_{c}" in prof]).merge(
+                ball, on="us_id", how="left")
         self.__dict__["_def_profile"] = prof
         return prof
 
@@ -236,13 +248,14 @@ class ForecastService:
                 index = StyleIndex(settings.cache_path / "chroma", self.latest_season)
                 index.sync(everyone, self._style_vectors(everyone))
                 hits = index.query(tv, n=len(everyone), groups=role.groups)
-                sim = {h["us_id"]: h["similarity"] for h in hits}
-                pool = cur[cur["us_id"].isin(sim)].assign(style_similarity=lambda d: d["us_id"].map(sim))
-                return pool.nlargest(k, "style_similarity")
+                cos = {h["us_id"]: h["similarity"] / 100 for h in hits}      # cosine distance -> cosine
+                pool = cur[cur["us_id"].isin(cos)].assign(style_cos=lambda d: d["us_id"].map(cos))
+                return pool.nlargest(k, "style_cos").assign(style_similarity=lambda d: style_score(d["style_cos"]))
             except Exception as e:  # noqa: BLE001 - retrieval must not fail the run
                 logger.warning("ChromaDB unavailable, using in-memory search: %s", e)
-        sim = self._style_vectors(cur) @ tv
-        return cur.assign(style_similarity=np.round(sim * 100, 1)).nlargest(k, "style_similarity")
+        cos = self._style_vectors(cur) @ tv
+        return cur.assign(style_cos=cos).nlargest(k, "style_cos").assign(
+            style_similarity=lambda d: style_score(d["style_cos"]))
 
     # ── the two questions ─────────────────────────────────────
     def project(self, players: pd.DataFrame, to_team: Optional[str] = None, age: Optional[float] = None,
@@ -271,7 +284,8 @@ class ForecastService:
                    exclude_teams: Iterable[str] = (), min_position_share: float = 0.5,
                    also_positions: Optional[Iterable[str]] = None, min_also_share: float = 0.1,
                    experience: Optional[Tuple[Iterable[str], int]] = None,
-                   penalty_taker: bool = False) -> pd.DataFrame:
+                   penalty_taker: bool = False, style_match: bool = False,
+                   min_pass_pct: Optional[float] = None) -> pd.DataFrame:
         """Closest players to the role's style (or to `target`), projected to `to_team`, ranked by
         role score. `role_key` is a key of ROLES or a custom RoleProfile (see forecast.brief).
         Adds `value_gap`: how cheap the player looks for his projected output.
@@ -284,6 +298,10 @@ class ForecastService:
                             Not checkable without lineup data (then only `sub_positions` applies).
         experience          (leagues, minutes): at least that many career minutes in one of the leagues.
         penalty_taker       took 2+ penalties over the last two seasons.
+        style_match         'a player like X': only players whose style points the same way as `target`
+                            (positive cosine, i.e. style score above 50) are ranked.
+        min_pass_pct        pass completion (0-1) over his last two seasons with FBref passing data;
+                            players without that data are left out.
         Leagues and clubs to exclude are matched on the current club (Transfermarkt) as well as the
         last Understat one; players who have retired or left the covered leagues are dropped."""
         role: RoleProfile = ROLES[role_key] if isinstance(role_key, str) else role_key
@@ -329,20 +347,32 @@ class ForecastService:
         if max_value_eur is not None:
             vals = cur["us_id"].map(self.values)
             cur = cur[vals.isna() | (vals <= max_value_eur)]
+        if min_pass_pct is not None:
+            prof = self.defensive_profile()
+            if "def_pass_pct" not in prof:
+                raise ValueError("This saved model has no passing data. Rebuild it (python -m forecast.build) "
+                                 "to filter on pass completion.")
+            known = prof[prof.get("ball_minutes_used", pd.Series(1.0, index=prof.index)) > 0]
+            ok = set(known.loc[known["def_pass_pct"] >= min_pass_pct, "us_id"])
+            cur = cur[cur["us_id"].isin(ok)]
         if cur.empty:
             return pd.DataFrame()
 
         # Style retrieval looks only at attacking output; for a role that leans on defending, rank
         # the whole filtered pool instead so good defenders aren't cut before scoring.
-        if uses_defensive(role):
+        if style_match and target is not None:
+            k = max(n * 4, 60)
+        elif uses_defensive(role):
             k = len(cur) if target is None else max(n * 8, 200)
         else:
             k = max(n * 2, 40)
         pool = self._retrieve(cur, role, min(k, 800), target)
+        if style_match and target is not None:
+            pool = pool[pool["style_cos"] > 0.05]       # 'like X' must clearly lean his way (style above 52)
         if pool.empty:
             return pd.DataFrame()
 
-        proj = self.with_defensive(self.project(pool.drop(columns=["style_similarity"]), to_team))
+        proj = self.with_defensive(self.project(pool.drop(columns=["style_similarity", "style_cos"]), to_team))
         reference = self.with_defensive(self.in_latest_season(self.ps))
         proj["role_score"] = np.round(role_scores(proj, role, reference), 2)
         proj["style_similarity"] = pool["style_similarity"].to_numpy()

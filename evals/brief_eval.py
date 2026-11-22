@@ -90,6 +90,14 @@ def reading_checks(b: briefs.Brief, expect: Dict) -> List[Check]:
         check("league experience", set(b.experience_leagues) == set(expect["experience"]), f"read {b.experience_leagues}")
     if "penalty_taker" in expect:
         check("penalty taker", b.penalty_taker == expect["penalty_taker"], f"read {b.penalty_taker}")
+    if "partner" in expect:
+        got = b.partner["name"] if b.partner is not None else None
+        check("partner", got is not None and _plain(expect["partner"]) in _plain(got), f"read {got or b.partner_query}")
+    if "min_pass_pct" in expect:
+        check("pass completion", b.min_pass_pct is not None and abs(b.min_pass_pct * 100 - expect["min_pass_pct"]) < 0.5,
+              f"read {b.min_pass_pct}")
+    if "positions_include" in expect:
+        check("positions include", set(expect["positions_include"]) <= set(b.positions), f"read {b.positions}")
     if "no_leagues_filter" in expect:
         check("no league filter", not b.leagues, f"read {b.leagues}")
     if "unmeasured_any" in expect:
@@ -125,6 +133,10 @@ def result_checks(b: briefs.Brief, df: pd.DataFrame, service=None) -> List[Check
     if b.experience_leagues and service is not None:
         rule(f"{b.experience_minutes}+ minutes in " + "/".join(b.experience_leagues),
              service.league_minutes(df["us_id"], b.experience_leagues) < b.experience_minutes)
+    if b.min_pass_pct is not None and "def_pass_pct" in df:
+        rule(f"pass completion >= {b.min_pass_pct:.0%}", df["def_pass_pct"].isna() | (df["def_pass_pct"] < b.min_pass_pct - 1e-9))
+    if b.anchor == "like" and b.replace is not None and "style_similarity" in df:
+        rule("style leans toward the reference (score > 50)", df["style_similarity"].notna() & (df["style_similarity"] <= 50))
     if b.penalty_taker and "pens" in df:
         rule("took 2+ penalties", df["pens"].notna() & (df["pens"] < 2))
     if b.min_age is not None:
