@@ -45,10 +45,11 @@ class DataCache:
             """)
             conn.commit()
 
-    def get(self, key: str) -> Optional[dict]:
+    def get(self, key: str, stale_ok: bool = False) -> Optional[dict]:
         """
         Get a cached value by key.
-        Returns None if not found or expired.
+        Returns None if not found or expired. An expired entry is kept on disk, not deleted: when
+        the source is down (Understat was, for weeks), `stale_ok=True` returns the last good copy.
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
@@ -62,9 +63,7 @@ class DataCache:
         value_json, timestamp = row
         age = time.time() - timestamp
 
-        if age > self.ttl_seconds:
-            # Expired — delete and return None
-            self.delete(key)
+        if age > self.ttl_seconds and not stale_ok:
             logger.debug(f"Cache EXPIRED: {key} (age: {age/3600:.1f}h)")
             return None
 

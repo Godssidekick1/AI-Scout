@@ -105,8 +105,12 @@ class UnderstatSource(BaseSource):
         players = await self._fetch_json_api(slug) or await self._fetch_html(slug)
         if players:
             self.cache.set(cache_key, {"players": players})
-        else:
-            logger.warning("Understat: no data for %s %s", slug, self.season)
+            return players
+        stale = self.cache.get(cache_key, stale_ok=True)        # site down: the last good copy
+        if stale is not None:
+            logger.warning("Understat: %s %s unreachable, using the cached copy", slug, self.season)
+            return stale.get("players", [])
+        logger.warning("Understat: no data for %s %s", slug, self.season)
         return players
 
     async def _fetch_json_api(self, slug: str) -> List[Dict]:

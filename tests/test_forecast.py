@@ -634,3 +634,37 @@ def test_replaced_player_and_retired_style_reference_are_kept_apart(named):
     s = brief.parse("someone with the vision of Pedri to replace Bukayo Saka", named)
     assert s.replace["name"] == "Bukayo Saka" and s.style_ref["name"] == "Pedri"
 
+
+
+def test_scout_picks_are_checked_against_the_data(named):
+    from forecast import brief
+    b = brief.parse("a winger to replace Bukayo Saka at Arsenal, under 25, max 30m", named)
+    df, _, _ = brief.search(b, named, n=10)
+    picks = [{"name": df.iloc[0]["name"], "club": "Somewhere FC", "why": "fits"},
+             {"name": "Mohamed Salah", "club": "Liverpool", "why": "star"},
+             {"name": "Invented Person", "club": "Nowhere", "why": "made up"}]
+    chk = brief.check_picks(b, named, picks, df)
+    top, salah, ghost = chk.iloc[0], chk.iloc[1], chk.iloc[2]
+    assert top["on_model_list"] and "club: data says" in top["flags"]
+    assert salah["flags"] and ("too old" in salah["flags"] or "over budget" in salah["flags"]) and pd.isna(salah["pool_rank"])
+    assert "not in the data" in ghost["flags"]
+    clean = brief.check_picks(b, named, [{"name": df.iloc[1]["name"], "club": df.iloc[1]["team"], "why": ""}], df).iloc[0]
+    assert clean["flags"] == "" and clean["pool_rank"] == 2
+
+
+def test_hidden_gem_backtest_runs_on_synthetic(world):
+    from evals import hidden_gem_backtest as h
+    from forecast.build import load_synthetic
+    ps, values, _ = load_synthetic()
+    full = ForecastService(ps=ps, model=None, minutes=None, values=values, synthetic=True)
+    last = int(ps["season"].max())
+    from forecast import roles
+    keep = {k: roles.ROLES[k] for k in ("poacher", "creative_winger")}
+    orig, h.ROLES = h.ROLES, keep
+    try:
+        res = h.run(full, [last - 2])
+    finally:
+        h.ROLES = orig
+    s = h.summarise(res, boots=50)
+    assert set(s["method"]) >= {"model", "last season", "priciest", "pool (random)", "model minus last season"}
+    assert ((res["n"] > 0) & res[h.OUTCOMES].le(1).all(axis=1)).all()

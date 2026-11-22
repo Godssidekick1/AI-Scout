@@ -4,8 +4,11 @@ Understat history
 Player-season totals for the big five, one row per player per team per season,
 from 2014/15 (Understat's first season) onward.
 
-Past seasons never change, so they are cached for a year; the current season
-uses the normal 24h cache.
+Past seasons never change, so they are kept for good (the Internet Archive rebuild lives
+only in this cache); the current season uses the normal 24h cache, and falls back to
+the last cached copy when understat.com is down.
+
+
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ async def load_seasons(seasons: Iterable[int], leagues: Iterable[str] = LEAGUES,
                        concurrency: int = 3) -> pd.DataFrame:
     """Fetch every (league, season) and return one DataFrame of player-season totals."""
     current = current_understat_season()
-    history_cache = DataCache(cache_dir=str(settings.cache_path), ttl_hours=24 * 365)
+    history_cache = DataCache(cache_dir=str(settings.cache_path), ttl_hours=24 * 365 * 100)   # finished seasons never change
     live_cache = DataCache(cache_dir=str(settings.cache_path), ttl_hours=settings.CACHE_TTL_HOURS)
     sem = asyncio.Semaphore(concurrency)
 

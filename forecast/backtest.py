@@ -123,8 +123,8 @@ def ladder_table(scores: pd.DataFrame, subset: str = "all") -> pd.DataFrame:
     return s
 
 
-def to_markdown(table: pd.DataFrame, digits: int = 4) -> str:
-    cols = ["model", *table.columns]
+def to_markdown(table: pd.DataFrame, digits: int = 4, index_name: str = "model") -> str:
+    cols = [index_name, *table.columns]
     lines = ["| " + " | ".join(map(str, cols)) + " |", "|" + "---|" * len(cols)]
     for idx, row in table.iterrows():
         vals = [f"{v:.{digits}f}" if isinstance(v, float) and not v.is_integer() else str(v) for v in row]

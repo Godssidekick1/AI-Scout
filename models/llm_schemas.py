@@ -152,3 +152,16 @@ class SummaryJudgement(BaseModel):
     faithfulness: int = Field(ge=1, le=5, description="5 = every claim is supported by the facts given; 1 = invents facts.")
     has_clear_recommendation: bool
     reasoning: str = Field(description="One sentence.")
+
+
+class ScoutPick(BaseModel):
+    name: str = Field(description="Full name as commonly written, e.g. 'Maghnes Akliouche'.")
+    club: str = Field(description="The club he plays for NOW, as far as you know.")
+    why: str = Field(description="One sentence: why he fits this brief.")
+
+
+class ScoutPicks(BaseModel):
+    """A scout's own shortlist for a brief, from football knowledge. The data model checks it."""
+
+    picks: List[ScoutPick] = Field(description="8 to 12 players, best fit first. Only players who currently play "
+                                   "in the Premier League, La Liga, Bundesliga, Serie A or Ligue 1.")

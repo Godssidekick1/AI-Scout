@@ -363,15 +363,10 @@ class ForecastService:
         if cur.empty:
             return pd.DataFrame()
 
-        # Style retrieval looks only at attacking output; for a role that leans on defending, rank
-        # the whole filtered pool instead so good defenders aren't cut before scoring.
-        if style_match and target is not None:
-            k = max(n * 4, 60)
-        elif uses_defensive(role):
-            k = len(cur) if target is None else max(n * 8, 200)
-        else:
-            k = max(n * 2, 40)
-        pool = self._retrieve(cur, role, min(k, 800), target)
+        # Rank the whole filtered pool (up to 800 closest in style): cutting to the few closest in
+        # style first dropped players who fit better overall (a top-10 list must be the top 10 by fit,
+        # the same as the 10 first of a longer list).
+        pool = self._retrieve(cur, role, min(len(cur), 800), target)
         if style_match and target is not None:
             pool = pool[pool["style_cos"] > 0.05]       # must clearly lean his way (style above 52)
         if pool.empty:

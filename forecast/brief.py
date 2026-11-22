@@ -1063,3 +1063,112 @@ def search(b: Brief, service, n: int = 10, exclude: Tuple[str, ...] = ()) -> Tup
     # 'hidden / bargain' already capped the price; within that, rank on fit (output + style), since
     # a value-gap sort put off-profile players first
     return df.head(n).reset_index(drop=True), him, prof
+
+
+# ── hybrid: a scout's (LLM's) own picks, checked by the data ───────────
+
+SCOUT_PROMPT = (
+    "You are an experienced football scout. Read the brief and name the players you would actually put on "
+    "the shortlist, from your own knowledge of the game. Respect every hard requirement in the brief (age, "
+    "budget, position, league, club). 'Hidden', 'underexplored' or 'under the radar' means players most fans "
+    "would not know yet: no established stars. Give each player's current club. Do not invent players.")
+
+
+def llm_picks(text: str) -> Tuple[List[dict], str]:
+    """Gemini's own shortlist for a brief: [{name, club, why}], and the model used. Uses the same model
+    chain as the brief reader and gives up quietly (empty list) when every model is out of quota."""
+    import asyncio
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from core import llm
+    from models.llm_schemas import ScoutPicks
+    from config import settings
+    if not settings.has_gemini() or not (text or "").strip():
+        return [], ""
+    models = [settings.GEMINI_MODEL] + [m.strip() for m in settings.GEMINI_BRIEF_FALLBACKS.split(",")
+                                        if m.strip() and m.strip() != settings.GEMINI_MODEL]
+    global _MODEL_START
+    for i in range(_MODEL_START, len(models)):
+        try:
+            out = asyncio.run(llm.structured(ScoutPicks, [SystemMessage(content=SCOUT_PROMPT), HumanMessage(content=text)],
+                                             name="forecast.scout_picks", model=models[i], temperature=0.0))
+        except llm.LLMError as e:
+            if "daily quota" not in str(e) and "not available" not in str(e):
+                return [], f"failed: {str(e)[:120]}"
+            _MODEL_START = i + 1
+            continue
+        return [p.model_dump() for p in out.picks], models[i]
+    return [], "every Gemini model is out of quota"
+
+
+def check_picks(b: Brief, service, picks: List[dict], shortlist: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Score a scout's picks exactly like the model's own candidates, and flag what the data disagrees
+    with: player not in the data, a different current club, over budget, outside the age range, wrong
+    position for the profile, too few minutes. `pool_rank` = where he would rank among every player who
+    passes the brief's filters (1 = the model's top pick); None when he fails a filter."""
+    from forecast.roles import role_scores
+    from forecast.service import STYLE_WEIGHT, style_score, _plain
+    prof, target = profile(b, service)
+    cap = b.max_value_eur if b.max_value_eur is not None else (HIDDEN_MAX_VALUE if b.sort == "value" else None)
+    reference = service.with_defensive(service.in_latest_season(service.ps))
+    rows = []
+    for p in picks:
+        hit = _named(p["name"], service, first_word=False)
+        if hit is None:
+            hit = service.find(p["name"], team=p.get("club"))
+            if hit is not None and not (set(_plain(p["name"]).split()) & set(_plain(hit["name"]).split())):
+                hit = None
+        if hit is None:
+            rows.append({"name": p["name"], "llm_club": p.get("club", ""), "why": p.get("why", ""),
+                         "flags": "not in the data (outside the big five, or no Understat match)"})
+            continue
+        proj = service.with_defensive(service.project(hit.to_frame().T.infer_objects(), b.to_team))
+        r = proj.iloc[0].to_dict()
+        r["role_score"] = round(float(role_scores(proj, prof, reference)[0]), 2)
+        cos = np.nan
+        if target is not None and (b.replace is not None or b.style_ref is not None):   # as in search()
+            v = service._style_vectors(hit.to_frame().T.infer_objects())[0]
+            cos = float(np.dot(v, target))
+        r["style_similarity"] = float(style_score(cos)) if np.isfinite(cos) else np.nan
+        r["fit"] = r["role_score"] + (STYLE_WEIGHT * cos if np.isfinite(cos) else 0.0)
+        flags = []
+        data_club = r.get("current_club") or r["team"]
+        if p.get("club") and _plain(p["club"]) not in _plain(str(data_club)) and _plain(str(data_club)) not in _plain(p["club"]):
+            flags.append(f"club: data says {data_club}")
+        val = r.get("market_value_eur")
+        if cap is not None and (pd.isna(val) or val > cap):
+            flags.append("value unknown" if pd.isna(val) else f"over budget ({val / 1e6:.0f}m)")
+        age = r.get("age")
+        if b.max_age is not None and (pd.isna(age) or age > b.max_age):
+            flags.append("age unknown" if pd.isna(age) else f"too old ({age:.0f})")
+        if b.min_age is not None and (pd.isna(age) or age < b.min_age):
+            flags.append("age unknown" if pd.isna(age) else f"too young ({age:.0f})")
+        lg_now = r.get("current_league") or r.get("league")
+        if b.leagues and lg_now not in b.leagues:
+            flags.append(f"plays in {lg_now}, brief asks for {', '.join(b.leagues)}")
+        if b.experience_leagues and service.league_minutes(pd.Series([hit["us_id"]]), b.experience_leagues).iloc[0] \
+                < b.experience_minutes:
+            flags.append(f"under {b.experience_minutes} min in {', '.join(b.experience_leagues)}")
+        if r.get("group") not in prof.groups:
+            flags.append(f"plays {r.get('group')}, profile is {'/'.join(prof.groups)}")
+        if r.get("minutes", 0) < b.min_minutes:
+            flags.append(f"only {r.get('minutes', 0):.0f} min last season")
+        if b.replace is not None and hit["us_id"] == b.replace["us_id"]:
+            flags.append("is the player being replaced")
+        r.update({"llm_club": p.get("club", ""), "why": p.get("why", ""), "flags": "; ".join(flags)})
+        rows.append(r)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    if "us_id" not in out:
+        out["us_id"] = np.nan
+    listed = set(shortlist["us_id"]) if shortlist is not None and not shortlist.empty else set()
+    out["on_model_list"] = out["us_id"].isin(listed)
+    out["pool_rank"] = None
+    if "fit" in out:
+        pool, _, _ = search(b, service, n=10 ** 6)
+        if not pool.empty:
+            fits = np.sort(pool["fit"].to_numpy(float))[::-1]
+            ok = out["flags"].fillna("").str.len().eq(0) & out["fit"].notna()
+            out.loc[ok, "pool_rank"] = [int((fits > f + 1e-3).sum()) + 1 for f in out.loc[ok, "fit"]]
+            out.attrs["pool_size"] = len(pool)
+    return out

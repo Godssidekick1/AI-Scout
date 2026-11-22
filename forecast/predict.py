@@ -194,7 +194,7 @@ UNMEASURED_WORDS = {"tackl": "tackling", "intercept": "interceptions", "aerial":
 
 
 def run_brief(service: ForecastService, text: str, replace: Optional[str] = None, n: int = 10,
-              overrides: Optional[dict] = None, exclude=()) -> None:
+              overrides: Optional[dict] = None, exclude=(), scout: bool = True) -> None:
     """Parse a brief, apply any explicit overrides, print what was understood and the shortlist."""
     from forecast import brief as briefs
     b = briefs.understand(text, service, replace=replace)
@@ -290,6 +290,41 @@ def run_brief(service: ForecastService, text: str, replace: Optional[str] = None
           + (" pens = penalties taken, last two seasons." if b.penalty_taker else "") + "\n"
           f"Drill into one:  python -m forecast.predict player \"{df.iloc[0]['name']}\""
           + (f" --to \"{b.to_team}\"" if b.to_team else ""))
+    if scout:
+        print_scout_picks(service, b, text if not replace else f"Replace {replace}. {text}", df)
+
+
+def print_scout_picks(service: ForecastService, b, text: str, shortlist: pd.DataFrame) -> None:
+    """Hybrid: Gemini's own shortlist from football knowledge, checked against the data. The model
+    can't see what it has no data on (current form, a move last week, reputation); Gemini can't
+    measure output and may be out of date. Showing both, checked, beats either alone."""
+    from forecast import brief as briefs
+    picks, used = briefs.llm_picks(text)
+    if not picks:
+        if used:
+            print(f"\nScout's picks (Gemini): skipped ({used}).")
+        return
+    chk = briefs.check_picks(b, service, picks, shortlist)
+    size = chk.attrs.get("pool_size")
+    print(f"\nScout's picks ({used}, from football knowledge), checked against the data"
+          + (f"; rank = where the model ranks him among the {size} players who pass the brief" if size else "") + ":")
+    head = f"{'':>3}  {'player':<23}{'club (data)':<20}{'age':>4}{'EUR M':>7}{'style':>6}{'score':>7}{'rank':>6}  flags / why"
+    print(head + "\n" + "-" * len(head))
+    for _, r in chk.iterrows():
+        if pd.isna(r.get("us_id", np.nan)):
+            print(f"{'':>3}  {str(r['name'])[:22]:<23}{str(r['llm_club'])[:18] + '?':<20}{'':>4}{'':>7}{'':>6}{'':>7}{'':>6}  {r['flags']}")
+            continue
+        club = str(r.get("current_club") or r["team"])[:18]
+        age = f"{r['age']:.0f}" if pd.notna(r.get("age")) else "?"
+        val = f"{r['market_value_eur'] / 1e6:.1f}" if pd.notna(r.get("market_value_eur")) else "?"
+        sty = f"{r['style_similarity']:.0f}" if pd.notna(r.get("style_similarity")) else ""
+        rank = str(int(r["pool_rank"])) if pd.notna(r.get("pool_rank")) else "-"
+        mark = "M" if r.get("on_model_list") else ""
+        note = r["flags"] or r["why"]
+        print(f"{mark:>3}  {str(r['name'])[:22]:<23}{club:<20}{age:>4}{val:>7}{sty:>6}{r['role_score']:>7.2f}{rank:>6}  {note[:90]}")
+    print("M = also on the model's list. score = same projected profile score as above. A flagged player fails "
+          "a hard filter in the brief, or the data disagrees with the scout (club from Transfermarkt, frozen "
+          "6 July 2026). Not in the data = outside the big five or no Understat match.")
 
 
 def cmd_find(service: ForecastService, args) -> None:
@@ -297,7 +332,7 @@ def cmd_find(service: ForecastService, args) -> None:
     if not text and not args.replace:
         sys.exit("Give a player to replace (--replace) and/or a description, e.g.\n"
                  '  python -m forecast.predict find --replace "Rodri" "younger, progressive passer, under 30m"')
-    run_brief(service, text, replace=args.replace, n=args.n, exclude=args.exclude or (),
+    run_brief(service, text, replace=args.replace, n=args.n, exclude=args.exclude or (), scout=not args.no_scout,
               overrides={"to_team": args.to, "max_age": args.max_age, "min_age": args.min_age,
                          "max_value_eur": args.max_value * 1e6 if args.max_value else None,
                          "leagues": args.leagues, "min_minutes": args.min_minutes,
@@ -369,6 +404,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     f.add_argument("--hidden", action="store_true", help="sort by value gap (cheap for the projected output)")
     f.add_argument("--exclude", nargs="+", metavar="NAME")
     f.add_argument("-n", type=int, default=10)
+    f.add_argument("--no-scout", action="store_true", help="skip Gemini's own picks (saves one Gemini request)")
 
     p = sub.add_parser("player", help="project one player, optionally at another club")
     p.add_argument("name")
